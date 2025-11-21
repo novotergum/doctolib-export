@@ -5,16 +5,20 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-// Pflicht-Umgebungsvariablen
+// Pflicht-ENV
 const DOCTOLIB_USER = process.env.DOCTOLIB_USER;
 const DOCTOLIB_PASS = process.env.DOCTOLIB_PASS;
 const DOCTOLIB_ORG_ID = process.env.DOCTOLIB_ORG_ID; // z.B. 263702
 
+// Login-URL (bei dir ist das Frontend /signin)
+const DOCTOLIB_LOGIN_URL =
+  process.env.DOCTOLIB_LOGIN_URL || 'https://pro.doctolib.de/signin';
+
 // Export-Verzeichnis
 const EXPORT_DIR = process.env.EXPORT_DIR || path.join(__dirname, 'exports');
 
-// Statistik-Konfiguration (optional per ENV überschreibbar)
-const DATE_FILTERING = process.env.DATE_FILTERING || 'start_date'; // 'start_date' = wahrgenommen, 'created_at' = gebucht
+// Statistik-Konfiguration
+const DATE_FILTERING = process.env.DATE_FILTERING || 'start_date'; // 'start_date' = wahrgenommen
 const PRIMARY_GROUP = process.env.PRIMARY_GROUP || 'agenda';       // 'agenda' = Terminkalender
 const SECONDARY_GROUP = process.env.SECONDARY_GROUP || '';         // '' = keine zweite Gruppierung
 const EXCLUDE_STATUSES = (process.env.EXCLUDE_STATUSES || 'deleted')
@@ -22,13 +26,12 @@ const EXCLUDE_STATUSES = (process.env.EXCLUDE_STATUSES || 'deleted')
   .map(s => s.trim())
   .filter(Boolean);
 
-// Sicherheitscheck ENV
 if (!DOCTOLIB_USER || !DOCTOLIB_PASS || !DOCTOLIB_ORG_ID) {
   console.error('Fehlende ENV: DOCTOLIB_USER, DOCTOLIB_PASS und DOCTOLIB_ORG_ID müssen gesetzt sein.');
   process.exit(1);
 }
 
-// Zeitraum: letzter vollständiger Monat (Start/Ende im Format JJJJ-MM-TT)
+// letzter vollständiger Monat
 function lastMonthRange() {
   const now = new Date();
   const firstThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -38,14 +41,13 @@ function lastMonthRange() {
   return { start: fmt(firstLastMonth), end: fmt(lastLastMonth) };
 }
 
-// Login auf pro.doctolib.de – nutzt die echten Input-Felder (autocomplete="username"/"current-password")
+// Login auf Doctolib
 async function login(page) {
-  console.log('Gehe zur Login-Seite …');
-  await page.goto('https://pro.doctolib.de/login', { waitUntil: 'networkidle' });
-
+  console.log('Gehe zur Login-Seite …', DOCTOLIB_LOGIN_URL);
+  await page.goto(DOCTOLIB_LOGIN_URL, { waitUntil: 'networkidle' });
   page.setDefaultTimeout(60000);
 
-  // Cookie-/Consent-Banner best-effort schließen
+  // Cookie-/Consent-Banner (best effort)
   try {
     const consentButton = page
       .getByRole('button', { name: /akzeptieren|zustimmen|alle akzeptieren/i })
@@ -56,7 +58,7 @@ async function login(page) {
       await page.waitForTimeout(1000);
     }
   } catch (_) {
-    // kein Banner sichtbar – ignorieren
+    // kein Banner: ok
   }
 
   // E-Mail / Username
@@ -77,7 +79,7 @@ async function login(page) {
   await passwordLocator.waitFor();
   await passwordLocator.fill(DOCTOLIB_PASS);
 
-  // Submit-Button
+  // Submit
   const submitButton = page
     .locator(
       [
@@ -98,7 +100,7 @@ async function login(page) {
   console.log('Login abgeschlossen, aktuelle URL:', page.url());
 }
 
-// Statistik-Seite öffnen und Zeitraum setzen
+// Statistik öffnen
 async function openStats(page, start, end) {
   const url = `https://pro.doctolib.de/configuration/statistics/queries?organization_id=${DOCTOLIB_ORG_ID}`;
   console.log('Öffne Statistik-Seite:', url);
@@ -107,28 +109,19 @@ async function openStats(page, start, end) {
   console.log(`Setze Zeitraum: ${start} bis ${end}`);
   await page.fill('#from', start);
   await page.fill('#to', end);
-
   await page.waitForTimeout(1500);
 }
 
-// Statistik-Parameter (Termine, Gruppierung, Status-Filter) setzen
+// Statistik-Konfiguration
 async function configureStats(page) {
   console.log('Konfiguriere Statistik …');
 
-  // Statistik zu: Termine
-  await page.selectOption('#table', 'appointment');
-
-  // „Statistik der“: wahrgenommen / gebucht
-  await page.selectOption('#date_filtering', DATE_FILTERING);
-
-  // Gruppierung
+  await page.selectOption('#table', 'appointment');            // Termine
+  await page.selectOption('#date_filtering', DATE_FILTERING);  // wahrgenommen / gebucht
   await page.selectOption('#appointment_group', PRIMARY_GROUP);
   await page.selectOption('#appointment_second_group', SECONDARY_GROUP || '');
-
-  // Kennzahl: Anzahl an Terminen
   await page.selectOption('#appointment_select', 'appointment_count');
 
-  // Status-Filter „Auszuschließende Termine“
   const allStatusValues = [
     'done',
     'no_show',
@@ -164,7 +157,7 @@ async function configureStats(page) {
   await page.waitForTimeout(1000);
 }
 
-// Export auslösen und Datei speichern
+// Export anstoßen
 async function exportStats(page, start, end) {
   if (!fs.existsSync(EXPORT_DIR)) {
     fs.mkdirSync(EXPORT_DIR, { recursive: true });
@@ -174,7 +167,7 @@ async function exportStats(page, start, end) {
 
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.click('input[name="csv"]'), // Button „Exportieren“
+    page.click('input[name="csv"]'),
   ]);
 
   const suggested = await download.suggestedFilename();
@@ -185,7 +178,7 @@ async function exportStats(page, start, end) {
   console.log('Export gespeichert:', filePath);
 }
 
-// Main-Flow
+// Main
 (async () => {
   const { start, end } = lastMonthRange();
   console.log(`Zeitraum (letzter Monat): ${start} – ${end}`);
@@ -203,7 +196,6 @@ async function exportStats(page, start, end) {
   } catch (e) {
     console.error('Fehler im Doctolib-Export:', e);
 
-    // Debug-Screenshot bei Fehler
     try {
       if (!fs.existsSync(EXPORT_DIR)) {
         fs.mkdirSync(EXPORT_DIR, { recursive: true });
@@ -211,8 +203,11 @@ async function exportStats(page, start, end) {
       const screenshotPath = path.join(EXPORT_DIR, 'error-login.png');
       await page.screenshot({ path: screenshotPath, fullPage: true });
       console.log('Fehler-Screenshot gespeichert unter:', screenshotPath);
+      const htmlSnippet = (await page.content()).slice(0, 2000);
+      console.log('Aktuelle URL:', page.url());
+      console.log('HTML-Ausschnitt:\n', htmlSnippet);
     } catch (screenshotErr) {
-      console.error('Konnte Screenshot nicht speichern:', screenshotErr);
+      console.error('Konnte Screenshot/HTML nicht speichern:', screenshotErr);
     }
 
     process.exitCode = 1;
