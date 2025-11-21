@@ -1,42 +1,24 @@
-name: Doctolib Termin-Export
-
-on:
-  schedule:
-    - cron: "0 3 * * *"   # täglich 03:00 UTC
-  workflow_dispatch:
-
 jobs:
   export:
     runs-on: ubuntu-latest
+
+    env:
+      DOCTOLIB_EMAIL: ${{ secrets.DOCTOLIB_EMAIL }}
+      DOCTOLIB_PASSWORD: ${{ secrets.DOCTOLIB_PASSWORD }}
+      DOCTOLIB_ORG_ID: "263702"          # oder ebenfalls als Secret
+      DOCTOLIB_FROM: "2025-10-01"
+      DOCTOLIB_TO: "2025-10-31"
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 20
 
-      - name: Install dependencies
-        run: npm install
+      - run: npm ci
 
-      - name: Install Playwright browsers
-        run: npx playwright install chromium
+      - run: npx playwright install chromium
 
       - name: Run export
-        env:
-          DOCTOLIB_USER: ${{ secrets.DOCTOLIB_USER }}
-          DOCTOLIB_PASS: ${{ secrets.DOCTOLIB_PASS }}
-          DOCTOLIB_ORG_ID: ${{ secrets.DOCTOLIB_ORG_ID }}
-          # optional:
-          # DATE_FILTERING: "start_date"
-          # PRIMARY_GROUP: "agenda"
-          # SECONDARY_GROUP: ""
-          # EXCLUDE_STATUSES: "deleted"
         run: npm run export
-
-      - name: Upload CSV
-        uses: actions/upload-artifact@v4
-        with:
-          name: doctolib-terminexport
-          path: exports/
-          if-no-files-found: warn
