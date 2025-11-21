@@ -1,20 +1,18 @@
-name: Doctolib Termin-Statistik Export
+name: Doctolib Termin-Export
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # täglich 03:00 UTC
-  workflow_dispatch:       # manueller Start
+    - cron: "0 3 * * *"
+  workflow_dispatch:
 
 jobs:
   export:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
@@ -24,21 +22,21 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install chromium
 
-      - name: Run Doctolib export
+      - name: Run export
         env:
           DOCTOLIB_USER: ${{ secrets.DOCTOLIB_USER }}
           DOCTOLIB_PASS: ${{ secrets.DOCTOLIB_PASS }}
           DOCTOLIB_ORG_ID: ${{ secrets.DOCTOLIB_ORG_ID }}
-          # optionale Overrides:
-          # DATE_FILTERING: "start_date"       # oder "created_at"
-          # PRIMARY_GROUP: "agenda"            # Terminkalender
-          # SECONDARY_GROUP: ""                # keine zweite Gruppierung
-          # EXCLUDE_STATUSES: "deleted"        # z.B. "deleted,no_show"
+          # optional:
+          # DATE_FILTERING: "start_date"
+          # PRIMARY_GROUP: "agenda"
+          # SECONDARY_GROUP: ""
+          # EXCLUDE_STATUSES: "deleted"
         run: npm run export
 
-      - name: Upload exports as artifact
+      - name: Upload CSV
         uses: actions/upload-artifact@v4
         with:
-          name: doctolib-terminstatistik
+          name: doctolib-terminexport
           path: exports/
           if-no-files-found: warn
