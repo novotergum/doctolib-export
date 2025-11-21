@@ -1,341 +1,283 @@
 // doctolib-export.js
-// Läuft mit Node 20 + Playwright (ESM). In package.json idealerweise: "type": "module"
+// Läuft mit Node 20 + Playwright
+// package.json sollte "type": "module" enthalten.
 
 import { chromium } from 'playwright';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// -------------------------------------------------------------
-// ENV-Handling
-// -------------------------------------------------------------
+// ---------- ENV & UTILITIES ----------
 
-function getRequiredEnv(name) {
+function getEnvVar(name, { required = true, defaultValue = undefined } = {}) {
   const value = process.env[name];
-  if (!value) {
+  if (required && (!value || value.trim() === '')) {
     throw new Error(`Bitte Umgebungsvariable ${name} setzen.`);
   }
-  return value;
+  return value?.trim() ?? defaultValue;
 }
 
-function getDateRangeFromEnv() {
-  let from = process.env.DOCTOLIB_FROM;
-  let to = process.env.DOCTOLIB_TO;
+function getDateRangeFromEnvOrLastFullMonth() {
+  const fromEnv = (process.env.DOCTOLIB_FROM || '').trim();
+  const toEnv = (process.env.DOCTOLIB_TO || '').trim();
 
-  if (!from || !to) {
-    // letzten vollen Monat bestimmen
-    const now = new Date();
-    const firstOfCurrent = new Date(now.getFullYear(), now.getMonth(), 1);
-    const lastOfPrevious = new Date(firstOfCurrent.getTime() - 24 * 60 * 60 * 1000);
-    const firstOfPrevious = new Date(
-      lastOfPrevious.getFullYear(),
-      lastOfPrevious.getMonth(),
-      1
-    );
-
-    from = firstOfPrevious.toISOString().slice(0, 10);
-    to = lastOfPrevious.toISOString().slice(0, 10);
-
-    console.log(
-      `DOCTOLIB_FROM/TO nicht gesetzt – nutze letzten vollen Monat: ${from} – ${to}`
-    );
-  } else {
-    console.log(`Nutze Zeitraum aus ENV: ${from} – ${to}`);
+  if (fromEnv && toEnv) {
+    return { from: fromEnv, to: toEnv };
   }
 
+  // Letzten vollen Monat berechnen (YYYY-MM-DD)
+  const now = new Date();
+  const firstOfCurrentMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const lastOfPreviousMonth = new Date(firstOfCurrentMonth.getTime() - 1);
+  const firstOfPreviousMonth = new Date(Date.UTC(lastOfPreviousMonth.getUTCFullYear(), lastOfPreviousMonth.getUTCMonth(), 1));
+
+  const fmt = (d) =>
+    d.toISOString().slice(0, 10); // YYYY-MM-DD
+
+  const from = fmt(firstOfPreviousMonth);
+  const to = fmt(lastOfPreviousMonth);
+
+  console.log(`DOCTOLIB_FROM/TO nicht gesetzt – nutze letzten vollen Monat: ${from} – ${to}`);
   return { from, to };
 }
 
-async function ensureExportsDir() {
+function ensureExportsDir() {
   const exportsDir = path.join(__dirname, 'exports');
-  await fs.promises.mkdir(exportsDir, { recursive: true });
+  if (!fs.existsSync(exportsDir)) {
+    fs.mkdirSync(exportsDir, { recursive: true });
+  }
   return exportsDir;
 }
 
-// -------------------------------------------------------------
-// Login-Flow
-// -------------------------------------------------------------
-
-async function acceptCookiesIfVisible(page) {
-  const candidates = [
-    /alle akzeptieren/i,
-    /akzeptieren/i,
-    /zustimmen/i,
-    /verstanden/i,
-    /ich stimme zu/i,
-  ];
-
-  for (const text of candidates) {
-    const btn = page.getByRole('button', { name: text });
-    try {
-      if (await btn.isVisible({ timeout: 2000 })) {
-        console.log('Cookie-/Consent-Button gefunden → klicke …');
-        await btn.click();
-        await page.waitForTimeout(1000);
-        return;
-      }
-    } catch {
-      // ignorieren
-    }
-  }
-}
+// ---------- LOGIN-LOGIK ----------
 
 /**
- * Login-Schleife:
- * - Solange wir auf /signin… sind:
- *   - wenn E-Mail-Feld sichtbar UND nicht disabled → E-Mail + "Weiter"
- *   - sonst, wenn Passwort-Feld sichtbar:
- *       - genau EINMAL Passwort absenden
- *       - wenn danach immer noch /signin → abbrechen mit klarer Fehlermeldung
- *   - sonst kurz warten
- * - Sobald URL nicht mehr /signin… enthält → Login fertig
+ * Robuster Login:
+ * - /signin E-Mail-Maske → E-Mail + "Weiter"
+ * - /signin Passwort-Maske (neues Oxygen-UI) → Passwort + "Einloggen"
+ * - Re-Auth-Maske (altes UI, input#password) → Passwort + "Einloggen"
  */
-async function login(page, email, password) {
-  const loginUrl = 'https://pro.doctolib.de/signin';
+async function performLogin(page, email, password) {
+  console.log('Gehe zur Login-Seite – https://pro.doctolib.de/signin');
+  await page.goto('https://pro.doctolib.de/signin', { waitUntil: 'networkidle' });
 
-  console.log('Gehe zur Login-Seite –', loginUrl);
-  await page.goto(loginUrl, { waitUntil: 'networkidle' });
-  console.log('Login-Step 0 URL:', page.url());
+  for (let step = 1; step <= 10; step++) {
+    const url = page.url();
+    console.log(`Login-Loop Step ${step}, aktuelle URL: ${url}`);
 
-  await acceptCookiesIfVisible(page);
-
-  let passwordAttempted = false;
-
-  // Wir erlauben bis zu 8 Iterationen
-  for (let step = 1; step <= 8; step++) {
-    const currentUrl = page.url();
-    console.log(`Login-Loop Step ${step}, aktuelle URL: ${currentUrl}`);
-
-    // Wenn wir nicht mehr auf /signin… sind, ist der Login fertig
-    try {
-      const u = new URL(currentUrl);
-      if (!u.pathname.startsWith('/signin')) {
-        console.log('Login abgeschlossen, finale URL:', currentUrl);
-        return;
-      }
-
-      // Spezieller Fall: Two-Factor-URL
-      if (u.pathname.startsWith('/signin/two-factor')) {
-        throw new Error(
-          'Doctolib verlangt einen Zwei-Faktor-Code (two-factor). ' +
-          'Der Login kann nicht vollautomatisch durchgeführt werden.'
-        );
-      }
-    } catch (e) {
-      // falls URL-Parsing schiefgeht, einfach weitermachen
+    // Wenn wir nicht mehr auf /signin sind → Login erfolgreich
+    if (!url.includes('/signin')) {
+      console.log('Login erfolgreich – wir sind nicht mehr auf /signin.');
+      return;
     }
 
-    // 1) E-Mail-Maske (nur wenn Feld NICHT disabled)
-    const emailLocator = page.getByLabel('E-Mail-Adresse');
-    let emailVisible = false;
-    let emailDisabled = false;
-
-    try {
-      emailVisible = await emailLocator.isVisible({ timeout: 2000 });
-      if (emailVisible) {
-        try {
-          emailDisabled = await emailLocator.isDisabled();
-        } catch {
-          emailDisabled = false;
-        }
-      }
-    } catch {
-      emailVisible = false;
-      emailDisabled = false;
-    }
-
-    if (emailVisible && !emailDisabled) {
-      console.log('E-Mail-Maske sichtbar (aktiv) → fülle E-Mail & klicke "Weiter".');
-
-      await emailLocator.fill(email);
-
-      const weiterButton = page.getByRole('button', { name: 'Weiter' });
-      await Promise.all([
-        weiterButton.click(),
-        page.waitForLoadState('networkidle'),
-      ]);
-
-      continue;
-    }
-
-    if (emailVisible && emailDisabled) {
-      console.log(
-        'E-Mail-Feld ist sichtbar, aber deaktiviert (vorbefüllt) → überspringe E-Mail-Logik und prüfe Passwort-Maske.'
+    // Sicherheitscheck: 2FA-/Two-Factor-Seite
+    if (url.includes('/signin/two-factor')) {
+      throw new Error(
+        'Doctolib verlangt Zwei-Faktor-Authentifizierung / zusätzlichen Sicherheitscode. ' +
+          'Automatischer Login ohne manuellen Eingriff ist so nicht möglich.'
       );
-      // Kein weiterer Klick hier – weiter unten kommt die Passwort-Maske
     }
 
-    // 2) Passwort-Maske?
-    const passwordInput = page.locator(
-      'input[type="password"][autocomplete="current-password"]'
-    );
-    let passwordVisible = false;
-    try {
-      passwordVisible = await passwordInput.isVisible({ timeout: 2000 });
-    } catch {
-      passwordVisible = false;
-    }
+    // --- FALL 3: Re-Auth-Formular (altes UI, bereits eingeloggt, input#password) ---
+    const legacyPasswordInput = page.locator('input#password[name="password"]');
+    if (await legacyPasswordInput.first().isVisible().catch(() => false)) {
+      console.log('Re-Auth-Passwort-Formular sichtbar → fülle Passwort & klicke "Einloggen".');
 
-    if (passwordVisible) {
-      if (passwordAttempted) {
-        // Wir waren bereits hier, haben Passwort gesendet und sind immer noch auf /signin
-        throw new Error(
-          'Nach einem Login-Versuch ist weiterhin die Passwort-Maske sichtbar. ' +
-          'Entweder ist das Passwort falsch oder Doctolib verlangt eine zusätzliche manuelle Sicherheitsbestätigung. ' +
-          'Bitte einmal manuell im Browser prüfen (passender Hinweis sollte angezeigt werden).'
-        );
-      }
-
-      console.log('Passwort-Maske sichtbar → fülle Passwort & prüfe Login-Button.');
-
-      await passwordInput.fill(password);
+      await legacyPasswordInput.fill(password);
 
       const loginButton = page.getByRole('button', { name: 'Einloggen' });
-
-      // Kurze Pause, damit etwaige Client-Validation den Button aktiviert
-      await page.waitForTimeout(300);
-
-      const enabled = await loginButton.isEnabled().catch(() => false);
-      if (!enabled) {
-        throw new Error(
-          'Der "Einloggen"-Button bleibt deaktiviert, obwohl ein Passwort gesetzt ist. ' +
-          'Vermutlich zusätzliche Sicherheitsmaßnahmen oder ein Client-Fehler. ' +
-          'Automation bricht an dieser Stelle ab.'
-        );
-      }
-
-      await Promise.all([
-        loginButton.click(),
-        page.waitForLoadState('networkidle'),
-      ]);
-
-      passwordAttempted = true;
+      await loginButton.click();
+      await page.waitForTimeout(1500);
       continue;
     }
 
-    // 3) Weder E-Mail noch Passwort-Feld explizit gefunden → kurz warten
-    console.log(
-      'Weder aktive E-Mail- noch Passwort-Maske eindeutig gefunden – warte kurz und prüfe erneut …'
-    );
-    await page.waitForTimeout(2000);
+    // --- FALL 2: Neue Passwort-Seite mit Avatar ("Passwort eingeben") ---
+    const passwordHeading = page.getByRole('heading', { name: /Passwort eingeben/i });
+    if (await passwordHeading.first().isVisible().catch(() => false)) {
+      console.log('Passwort-Maske (neues UI) sichtbar → fülle Passwort & klicke "Einloggen".');
+
+      // Wichtig: nicht getByLabel('Passwort') benutzen (kollidiert mit IconButton „Passwort anzeigen“)
+      const newPasswordInput = page
+        .locator('input[autocomplete="current-password"][type="password"]')
+        .first();
+
+      await newPasswordInput.fill(password);
+
+      const loginButton = page.getByRole('button', { name: 'Einloggen' });
+      await loginButton.click();
+      await page.waitForTimeout(1500);
+
+      // Wenn nach einem Login-Versuch immer noch Passwort-Maske: evtl. falsches PW oder zusätzlicher Check
+      const stillOnSignin = page.url().includes('/signin');
+      const stillPasswordHeading = await passwordHeading.first().isVisible().catch(() => false);
+      if (stillOnSignin && stillPasswordHeading) {
+        console.log(
+          'Hinweis: Nach Passwort-Submit ist weiterhin die Passwort-Maske sichtbar. ' +
+            'Entweder ist das Passwort falsch oder es gibt eine zusätzliche Sicherheitsabfrage.'
+        );
+      }
+
+      continue;
+    }
+
+    // --- FALL 1: E-Mail-Maske ---
+    const emailInput = page
+      .locator('input[autocomplete="username"][type="email"], input#input_:r0:')
+      .first();
+
+    if (await emailInput.isVisible().catch(() => false)) {
+      const disabled = await emailInput.isDisabled().catch(() => false);
+
+      if (!disabled) {
+        console.log('E-Mail-Maske (aktiv) → fülle E-Mail & klicke "Weiter".');
+        await emailInput.fill(email);
+      } else {
+        console.log('E-Mail-Feld ist deaktiviert (vorbefüllt) → klicke nur "Weiter".');
+      }
+
+      const weiterButton = page.getByRole('button', { name: 'Weiter' });
+      await weiterButton.click();
+      await page.waitForTimeout(1500);
+      continue;
+    }
+
+    console.log('Keine bekannte Login-Maske erkannt – warte kurz & prüfe erneut …');
+    await page.waitForTimeout(1000);
   }
 
-  throw new Error(
-    `Login konnte nach mehreren Versuchen nicht abgeschlossen werden; aktuelle URL: ${page.url()}`
-  );
+  throw new Error(`Login konnte nicht abgeschlossen werden; aktuelle URL: ${page.url()}`);
 }
 
-// -------------------------------------------------------------
-// Statistik-Export
-// -------------------------------------------------------------
+// ---------- STATISTIK-EXPORT ----------
 
-async function exportStatistics(page, orgId, fromDate, toDate) {
-  const statsUrl = `https://pro.doctolib.de/configuration/statistics/queries?organization_id=${orgId}`;
-  console.log('Öffne Statistik-Seite –', statsUrl);
-  await page.goto(statsUrl, { waitUntil: 'domcontentloaded' });
+/**
+ * Navigiert zur Statistik-Seite, setzt Datum & Organisation und triggert CSV-Export.
+ *
+ * Du kannst DOCTOLIB_STATS_URL überschreiben, wenn die URL anders ist.
+ */
+async function exportStatistics(page, { orgId, from, to }) {
+  const statsUrlFromEnv = (process.env.DOCTOLIB_STATS_URL || '').trim();
 
-  if (page.url().includes('/signin')) {
-    throw new Error(
-      `Beim Öffnen der Statistikseite wieder auf /signin gelandet (mögliche Sicherheitsabfrage / 2FA). URL: ${page.url()}`
-    );
-  }
+  // Fallback-URL – ggf. im Account anpassen/überschreiben über DOCTOLIB_STATS_URL
+  const defaultStatsUrl = `https://pro.doctolib.de/configuration/statistics?organization_id=${encodeURIComponent(
+    orgId
+  )}`;
 
-  console.log('Setze Zeitraum:', fromDate, '–', toDate);
+  const targetUrl = statsUrlFromEnv || defaultStatsUrl;
 
-  await page.locator('select[name="table"]').selectOption('appointment');
-  await page.locator('select[name="date_filtering"]').selectOption('start_date');
+  console.log(`Öffne Statistik-Seite: ${targetUrl}`);
+  await page.goto(targetUrl, { waitUntil: 'networkidle' });
 
-  const fromInput = page.locator('input[name="from"]');
-  const toInput = page.locator('input[name="to"]');
-  await fromInput.fill(fromDate);
-  await toInput.fill(toDate);
+  // Warten, bis das Statistik-Formular sichtbar ist
+  const tableSelect = page.locator('select#table');
+  await tableSelect.waitFor({ state: 'visible', timeout: 30000 });
 
-  await page
-    .locator('select[name="appointment_group"]')
-    .selectOption('start_date_day');
-  await page
-    .locator('select[name="appointment_second_group"]')
-    .selectOption('');
-  await page
-    .locator('select[name="appointment_select"]')
-    .selectOption('appointment_count');
-
-  const deletedCheckbox = page.locator(
-    'input[name="status_filters[]"][value="deleted"]'
-  );
+  // "Termine" auswählen (falls nicht schon vorausgewählt)
   try {
-    if (await deletedCheckbox.isChecked()) {
-      await deletedCheckbox.uncheck();
-    }
+    await tableSelect.selectOption('appointment');
   } catch {
-    // ignorieren, wenn nicht vorhanden
+    // Wenn die Option bereits gesetzt ist oder das Select anders funktioniert, einfach weitermachen.
   }
 
-  const exportsDir = await ensureExportsDir();
-  const targetPath = path.join(
-    exportsDir,
-    `doctolib_${fromDate}_${toDate}.csv`
-  );
+  // Datum setzen – die Inputs sind type="date" mit IDs #from und #to
+  const fromInput = page.locator('input#from');
+  const toInput = page.locator('input#to');
 
-  console.log('Starte CSV-Export …');
+  await fromInput.waitFor({ state: 'visible', timeout: 15000 });
+  await toInput.waitFor({ state: 'visible', timeout: 15000 });
+
+  console.log(`Setze Zeitraum: von ${from} bis ${to}`);
+  await fromInput.fill(from);
+  await toInput.fill(to);
+
+  // Sicherstellen, dass die Form übernommen ist (kurze Pause)
+  await page.waitForTimeout(500);
+
+  // Download-Ereignis abfangen
+  const exportsDir = ensureExportsDir();
+  const fileName = `doctolib_appointments_${orgId}_${from}_${to}.csv`;
+  const targetPath = path.join(exportsDir, fileName);
+
+  console.log('Starte CSV-Export (warte auf Download)…');
+
   const [download] = await Promise.all([
-    page.waitForEvent('download', { timeout: 120000 }),
-    page.getByRole('button', { name: 'Exportieren' }).click(),
+    page.waitForEvent('download', { timeout: 60000 }),
+    // Entweder Button "Exportieren" (altes UI) oder input[name="csv"]
+    (async () => {
+      const exportButton = page.getByRole('button', { name: /Exportieren/i });
+      if (await exportButton.isVisible().catch(() => false)) {
+        await exportButton.click();
+        return;
+      }
+      const exportInput = page.locator('input[type="submit"][name="csv"]');
+      if (await exportInput.isVisible().catch(() => false)) {
+        await exportInput.click();
+        return;
+      }
+      throw new Error('Kein "Exportieren"-Button/Submit-Button gefunden.');
+    })(),
   ]);
 
   const suggested = download.suggestedFilename();
-  console.log('Vorgeschlagener Dateiname von Doctolib:', suggested);
+  console.log(`Download gestartet, vorgeschlagener Dateiname: ${suggested}`);
 
   await download.saveAs(targetPath);
-  console.log('CSV gespeichert unter:', targetPath);
+  console.log(`Export erfolgreich gespeichert unter: ${targetPath}`);
 }
 
-// -------------------------------------------------------------
-// Main
-// -------------------------------------------------------------
+// ---------- MAIN ----------
 
 async function main() {
-  const email = getRequiredEnv('DOCTOLIB_EMAIL');
-  const password = getRequiredEnv('DOCTOLIB_PASSWORD');
-  const orgId = getRequiredEnv('DOCTOLIB_ORG_ID');
-  const { from, to } = getDateRangeFromEnv();
+  const email = getEnvVar('DOCTOLIB_EMAIL');
+  const password = getEnvVar('DOCTOLIB_PASSWORD');
+  const orgId = getEnvVar('DOCTOLIB_ORG_ID');
+  const { from, to } = getDateRangeFromEnvOrLastFullMonth();
 
-  const headless = process.env.HEADLESS !== 'false';
+  const headless = process.env.HEADLESS === 'false' ? false : true;
 
-  const browser = await chromium.launch({ headless });
-  const context = await browser.newContext({
-    acceptDownloads: true,
-    locale: 'de-DE',
-    viewport: { width: 1280, height: 720 },
+  ensureExportsDir();
+
+  const browser = await chromium.launch({
+    headless,
   });
+
+  const context = await browser.newContext({
+    locale: 'de-DE',
+    viewport: { width: 1280, height: 800 },
+  });
+
   const page = await context.newPage();
 
   try {
-    await login(page, email, password);
-    await exportStatistics(page, orgId, from, to);
-    console.log('Doctolib-Export erfolgreich abgeschlossen.');
+    await performLogin(page, email, password);
+
+    // Nach Login: ggf. Doctolib eigenständig auf eine Startseite umleiten lassen,
+    // dann Statistik aufrufen.
+    await exportStatistics(page, { orgId, from, to });
+
+    await browser.close();
   } catch (err) {
-    console.error('Fehler im Doctolib-Export:', err.message || err);
+    console.error('Fehler im Doctolib-Export:', err?.message || err);
 
     try {
-      const exportsDir = await ensureExportsDir();
+      const exportsDir = ensureExportsDir();
       const screenshotPath = path.join(exportsDir, 'error-login.png');
       await page.screenshot({ path: screenshotPath, fullPage: true });
-      console.error('Fehler-Screenshot gespeichert unter:', screenshotPath);
+      console.error(`Fehler-Screenshot gespeichert unter: ${screenshotPath}`);
     } catch (sErr) {
-      console.error('Konnte Fehler-Screenshot nicht schreiben:', sErr);
+      console.error('Screenshot konnte nicht erstellt werden:', sErr?.message || sErr);
     }
 
-    process.exitCode = 1;
-  } finally {
     await browser.close();
+    process.exit(1);
   }
 }
 
-main().catch((err) => {
-  console.error('Unerwarteter Fehler:', err);
-  process.exit(1);
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  // Direkt aufgerufen
+  main();
+}
