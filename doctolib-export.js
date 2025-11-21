@@ -37,16 +37,15 @@ async function loginWithOptionalTwoFactor(page) {
     // 1. E-Mail-Eingabe falls sichtbar
     const emailInput = page.locator('input[autocomplete="username"], input[type="email"]');
     if (await emailInput.count() && await emailInput.first().isVisible()) {
-      console.log('E-Mail-Maske sichtbar → fülle E-Mail.');
-      await emailInput.first().fill(EMAIL);
-
-      const weiterButton = page.locator('button span:text("Weiter")').first().or(
-        page.locator('button:has-text("Weiter")').first()
-      );
-
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle' }),
-        weiterButton.click()
+    console.log("E-Mail-Maske sichtbar → fülle E-Mail.");
+    await page.fill('input[autocomplete="username"], input[type="email"]', DOCTOLIB_EMAIL);
+    
+    // Neuer, eindeutiger Locator:
+    const weiterButton = page.locator('button', { hasText: 'Weiter' }).first();
+    await weiterButton.click();
+    
+    // Kurz warten, bis die nächste Seite/der nächste Step geladen ist
+    await page.waitForLoadState('networkidle');
       ]);
 
       continue; // nächster Durchlauf → Passwortseite
