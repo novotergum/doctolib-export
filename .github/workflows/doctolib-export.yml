@@ -1,9 +1,9 @@
-name: Doctolib Insights Export
+name: Doctolib Termin-Statistik Export
 
 on:
   schedule:
-    - cron: "0 3 * * *"  # täglich um 03:00 UTC
-  workflow_dispatch:
+    - cron: "0 3 * * *"   # täglich 03:00 UTC
+  workflow_dispatch:       # manueller Start
 
 jobs:
   export:
@@ -21,16 +21,24 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Run export
+      - name: Install Playwright browsers
+        run: npx playwright install chromium
+
+      - name: Run Doctolib export
         env:
-          INSIGHTS_BASE_URL: "https://dbinsights-production.doctolib.fr"
-          INSIGHTS_PATH: ${{ secrets.DOCTOLIB_INSIGHTS_PATH }}
-          OUTPUT_NAME: "doctolib_insights.csv"
+          DOCTOLIB_USER: ${{ secrets.DOCTOLIB_USER }}
+          DOCTOLIB_PASS: ${{ secrets.DOCTOLIB_PASS }}
+          DOCTOLIB_ORG_ID: ${{ secrets.DOCTOLIB_ORG_ID }}
+          # optionale Overrides:
+          # DATE_FILTERING: "start_date"       # oder "created_at"
+          # PRIMARY_GROUP: "agenda"            # Terminkalender
+          # SECONDARY_GROUP: ""                # keine zweite Gruppierung
+          # EXCLUDE_STATUSES: "deleted"        # z.B. "deleted,no_show"
         run: npm run export
 
-      - name: Upload export as artifact
+      - name: Upload exports as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: doctolib-insights
+          name: doctolib-terminstatistik
           path: exports/
           if-no-files-found: warn
