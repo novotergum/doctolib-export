@@ -1,0 +1,11 @@
+{
+  "name": "doctolib-export",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "export": "node doctolib-export.js"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}
