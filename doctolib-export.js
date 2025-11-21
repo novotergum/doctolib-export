@@ -1,23 +1,70 @@
 // doctolib-export.js
-import { chromium } from 'playwright';
-import fs from 'node:fs';
-import path from 'node:path';
+// Automatischer Doctolib-Statistik-Export (Termine) via Playwright/Chromium
+
+const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
+
+// ---------- ENV & Konstanten ----------
 
 const EMAIL = process.env.DOCTOLIB_EMAIL;
 const PASSWORD = process.env.DOCTOLIB_PASSWORD;
-const ORG_ID = process.env.DOCTOLIB_ORG_ID;           // z.B. 263702
-const FROM = process.env.DOCTOLIB_FROM;              // "2025-10-01"
-const TO = process.env.DOCTOLIB_TO;                  // "2025-10-31"
+const ORG_ID = process.env.DOCTOLIB_ORG_ID; // z.B. 263702
+let FROM = process.env.DOCTOLIB_FROM;       // "2025-10-01"
+let TO = process.env.DOCTOLIB_TO;           // "2025-10-31"
 
-const LOGIN_URL = 'https://pro.doctolib.de/signin';
-const STATS_URL =
-  `https://pro.doctolib.de/configuration/statistics/queries?organization_id=${ORG_ID}`;
+const LOGIN_URL = process.env.DOCTOLIB_LOGIN_URL || 'https://pro.doctolib.de/signin';
+const STATS_URL = `https://pro.doctolib.de/configuration/statistics/queries?organization_id=${ORG_ID}`;
+const EXPORT_DIR = process.env.EXPORT_DIR || path.join(__dirname, 'exports');
+
+const USER_AGENT =
+  process.env.DOCTOLIB_UA ||
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
+
+// Fallback: wenn FROM/TO nicht gesetzt → letzter kompletter Monat
+function getLastMonthRange() {
+  const now = new Date();
+  const firstThisMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const lastDayLastMonth = new Date(firstThisMonth.getTime() - 1);
+  const firstDayLastMonth = new Date(
+    Date.UTC(lastDayLastMonth.getUTCFullYear(), lastDayLastMonth.getUTCMonth(), 1)
+  );
+
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return {
+    from: fmt(firstDayLastMonth),
+    to: fmt(lastDayLastMonth),
+  };
+}
+
+if (!FROM || !TO) {
+  const range = getLastMonthRange();
+  FROM = range.from;
+  TO = range.to;
+  console.log('DOCTOLIB_FROM/TO nicht gesetzt – nutze letzten Monat:', FROM, '-', TO);
+}
+
+if (!EMAIL || !PASSWORD || !ORG_ID) {
+  console.error(
+    'Bitte DOCTOLIB_EMAIL, DOCTOLIB_PASSWORD und DOCTOLIB_ORG_ID setzen (ENV).'
+  );
+  process.exit(1);
+}
+
+// ---------- Hilfsfunktionen ----------
 
 async function acceptCookiesIfPresent(page) {
-  const cookieButton = page.locator('button:has-text("Akzeptieren")');
-  if (await cookieButton.count()) {
-    console.log('Cookie- / Consent-Button gefunden → klicke …');
-    await cookieButton.first().click({ timeout: 5000 }).catch(() => {});
+  try {
+    const btn = page
+      .getByRole('button', { name: /akzeptieren|zustimmen|alle akzeptieren/i })
+      .first();
+    if (await btn.isVisible({ timeout: 3000 }).catch(() => false)) {
+      console.log('Cookie-/Consent-Button gefunden → klicke …');
+      await btn.click();
+      await page.waitForTimeout(1000);
+    }
+  } catch {
+    // kein Banner, kein Problem
   }
 }
 
@@ -27,65 +74,83 @@ async function acceptCookiesIfPresent(page) {
 async function loginWithOptionalTwoFactor(page) {
   console.log('Gehe zur Login-Seite –', LOGIN_URL);
   await page.goto(LOGIN_URL, { waitUntil: 'networkidle' });
+  page.setDefaultTimeout(60000);
 
   await acceptCookiesIfPresent(page);
 
+  // maximal 4 Iterationen: E-Mail → Passwort → evtl. zweites Passwort → fertig
   for (let step = 0; step < 4; step++) {
     const url = page.url();
     console.log('Login-Step', step, 'URL:', url);
 
-    // 1. E-Mail-Eingabe falls sichtbar
-    const emailInput = page.locator('input[autocomplete="username"], input[type="email"]');
-    if (await emailInput.count() && await emailInput.first().isVisible()) {
-    console.log("E-Mail-Maske sichtbar → fülle E-Mail.");
-    await page.fill('input[autocomplete="username"], input[type="email"]', DOCTOLIB_EMAIL);
-    
-    // Neuer, eindeutiger Locator:
-    const weiterButton = page.locator('button', { hasText: 'Weiter' }).first();
-    await weiterButton.click();
-    
-    // Kurz warten, bis die nächste Seite/der nächste Step geladen ist
-    await page.waitForLoadState('networkidle');
-      ]);
+    // 1) E-Mail-Maske
+    const emailInput = page
+      .locator('input[autocomplete="username"], input[type="email"]')
+      .first();
 
-      continue; // nächster Durchlauf → Passwortseite
-    }
+    if (await emailInput.isVisible().catch(() => false)) {
+      console.log('E-Mail-Maske sichtbar → fülle E-Mail.');
+      await emailInput.fill(EMAIL);
 
-    // 2. Passwort-Eingabe (normaler Login oder /signin/two-factor)
-    const passwordInput = page.locator('input[name="password"], input[autocomplete="current-password"]');
-    if (await passwordInput.count() && await passwordInput.first().isVisible()) {
-      console.log('Passwort-Maske sichtbar → fülle Passwort.');
-      await passwordInput.first().fill(PASSWORD);
-
-      const einloggenButton = page.locator('button span:text("Einloggen")').first().or(
-        page.locator('button:has-text("Einloggen")').first()
-      );
+      const weiterButton = page.locator('button', { hasText: 'Weiter' }).first();
 
       await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle' }),
-        einloggenButton.click()
+        weiterButton.click(),
+        page
+          .waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 })
+          .catch(() => page.waitForLoadState('networkidle').catch(() => {})),
       ]);
 
-      // Wenn wir nach dem ersten Login auf /signin/two-factor landen,
-      // wird im nächsten Loop-Durchlauf wieder die Passwort-Maske erkannt.
+      continue; // Nächster Schritt (Passwort-Maske)
+    }
+
+    // 2) Passwort-Maske (normal oder /signin/two-factor)
+    const passwordInput = page
+      .locator(
+        'input[name="password"], ' +
+          'input[autocomplete="current-password"], ' +
+          'input#password'
+      )
+      .first();
+
+    if (await passwordInput.isVisible().catch(() => false)) {
+      console.log('Passwort-Maske sichtbar → fülle Passwort.');
+      await passwordInput.fill(PASSWORD);
+
+      const loginButton = page
+        .locator('button', { hasText: 'Einloggen' })
+        .first();
+
+      await Promise.all([
+        loginButton.click(),
+        page
+          .waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 })
+          .catch(() => page.waitForLoadState('networkidle').catch(() => {})),
+      ]);
+
+      // wenn nach dem ersten Passwort-Schritt /signin/two-factor kommt,
+      // wird im nächsten Loop-Durchlauf wieder passwordInput erkannt
       continue;
     }
 
-    // 3. Prüfen, ob wir raus aus /signin sind → dann ist Login fertig
+    // 3) Wenn wir nicht mehr auf /signin sind → Login gilt als abgeschlossen
     if (!page.url().includes('/signin')) {
       console.log('Login abgeschlossen, aktuelle URL:', page.url());
       return;
     }
 
-    // 4. Kleine Pause und nochmal versuchen
+    // 4) Kleine Pause und weiter probieren
     await page.waitForTimeout(1000);
   }
 
   throw new Error(`Login konnte nicht abgeschlossen werden, aktuelle URL: ${page.url()}`);
 }
 
+/**
+ * Öffnet die Statistikseite und triggert den CSV-Export.
+ */
 async function openStatsAndExport(page, from, to) {
-  console.log('Offline Statistik-Seite:', STATS_URL);
+  console.log('Öffne Statistik-Seite:', STATS_URL);
   await page.goto(STATS_URL, { waitUntil: 'networkidle' });
 
   if (page.url().includes('/signin')) {
@@ -104,42 +169,63 @@ async function openStatsAndExport(page, from, to) {
   await fromInput.fill(from);
   await toInput.fill(to);
 
-  // Sicherheit: Kontrollausgabe
-  console.log('Zeitraum-Felder gesetzt, starte Export …');
+  // Optional: ein wenig warten, bis Doctolib intern neu berechnet
+  await page.waitForTimeout(1000);
+
+  console.log('Zeitraum gesetzt, starte Export …');
+
+  if (!fs.existsSync(EXPORT_DIR)) {
+    fs.mkdirSync(EXPORT_DIR, { recursive: true });
+  }
 
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.locator('input[type="submit"][value*="Exportieren"]').click()
+    page.locator('input[type="submit"][value*="Exportieren"]').click(),
   ]);
 
-  const suggested = download.suggestedFilename();
-  const outDir = path.resolve('exports');
-  fs.mkdirSync(outDir, { recursive: true });
-  const outPath = path.join(outDir, suggested);
+  const suggested = await download.suggestedFilename();
+  const outPath = path.join(EXPORT_DIR, suggested);
 
   await download.saveAs(outPath);
   console.log('Export gespeichert unter:', outPath);
 }
 
+// ---------- Main ----------
+
 (async () => {
-  if (!EMAIL || !PASSWORD || !ORG_ID || !FROM || !TO) {
-    console.error('Bitte DOCTOLIB_EMAIL, DOCTOLIB_PASSWORD, DOCTOLIB_ORG_ID, DOCTOLIB_FROM und DOCTOLIB_TO setzen.');
-    process.exit(1);
-  }
+  console.log(`Starte Doctolib-Export für Zeitraum: ${FROM} – ${TO}`);
 
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
+  const context = await browser.newContext({
+    userAgent: USER_AGENT,
+    viewport: { width: 1280, height: 720 },
+    locale: 'de-DE',
+  });
   const page = await context.newPage();
+  page.setDefaultTimeout(60000);
 
   try {
     await loginWithOptionalTwoFactor(page);
     await openStatsAndExport(page, FROM, TO);
+    console.log('Doctolib-Export erfolgreich abgeschlossen.');
   } catch (err) {
-    console.error('Fehler im Doctolib-Export:', err.message);
+    console.error('Fehler im Doctolib-Export:', err && err.message ? err.message : err);
     console.error('Aktuelle URL:', page.url());
-    // kleine HTML-Schnipsel loggen hilft beim Debugging
-    const html = await page.content();
-    console.error('HTML-Ausschnitt:', html.slice(0, 1000));
+
+    try {
+      if (!fs.existsSync(EXPORT_DIR)) {
+        fs.mkdirSync(EXPORT_DIR, { recursive: true });
+      }
+      const screenshotPath = path.join(EXPORT_DIR, 'error-login.png');
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      console.log('Fehler-Screenshot gespeichert unter:', screenshotPath);
+
+      const html = await page.content();
+      console.log('HTML-Ausschnitt:\n', html.slice(0, 2000));
+    } catch (screenshotErr) {
+      console.error('Konnte Screenshot/HTML nicht speichern:', screenshotErr);
+    }
+
     process.exitCode = 1;
   } finally {
     await browser.close();
