@@ -86,7 +86,7 @@ async function acceptCookiesIfVisible(page) {
 /**
  * Login-Schleife:
  * - Solange wir auf /signin… sind:
- *   - wenn E-Mail-Feld sichtbar → E-Mail + "Weiter"
+ *   - wenn E-Mail-Feld sichtbar → (sofern nicht disabled) E-Mail + "Weiter"
  *   - sonst, wenn Passwort-Feld sichtbar → Passwort + "Einloggen"
  *   - sonst kurz warten
  * - Sobald URL nicht mehr /signin… enthält → Login fertig
@@ -117,18 +117,31 @@ async function login(page, email, password) {
     }
 
     // 1) E-Mail-Maske?
+    const emailLocator = page.getByLabel('E-Mail-Adresse');
     let emailVisible = false;
     try {
-      emailVisible = await page.getByLabel('E-Mail-Adresse').isVisible({ timeout: 2000 });
+      emailVisible = await emailLocator.isVisible({ timeout: 2000 });
     } catch {
       emailVisible = false;
     }
 
     if (emailVisible) {
-      console.log('E-Mail-Maske sichtbar → fülle E-Mail & klicke "Weiter".');
+      // prüfen, ob das Feld bereits disabled (vorbefüllt & gesperrt) ist
+      let isDisabled = false;
+      try {
+        isDisabled = await emailLocator.isDisabled();
+      } catch {
+        isDisabled = false;
+      }
 
-      const emailInput = page.getByLabel('E-Mail-Adresse');
-      await emailInput.fill(email);
+      if (isDisabled) {
+        console.log(
+          'E-Mail-Feld ist deaktiviert und bereits gesetzt → fülle NICHT erneut, klicke nur "Weiter".'
+        );
+      } else {
+        console.log('E-Mail-Maske sichtbar → fülle E-Mail & klicke "Weiter".');
+        await emailLocator.fill(email);
+      }
 
       const weiterButton = page.getByRole('button', { name: 'Weiter' });
       await Promise.all([
