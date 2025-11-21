@@ -1,7 +1,7 @@
 {
   "name": "doctolib-export",
   "version": "1.0.0",
-  "type": "module",
+  "private": true,
   "scripts": {
     "export": "node doctolib-export.js"
   },
