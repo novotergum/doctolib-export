@@ -87,7 +87,9 @@ async function acceptCookiesIfVisible(page) {
  * Login-Schleife:
  * - Solange wir auf /signin… sind:
  *   - wenn E-Mail-Feld sichtbar UND nicht disabled → E-Mail + "Weiter"
- *   - sonst, wenn Passwort-Feld sichtbar → Passwort + "Einloggen"
+ *   - sonst, wenn Passwort-Feld sichtbar:
+ *       - genau EINMAL Passwort absenden
+ *       - wenn danach immer noch /signin → abbrechen mit klarer Fehlermeldung
  *   - sonst kurz warten
  * - Sobald URL nicht mehr /signin… enthält → Login fertig
  */
@@ -100,7 +102,9 @@ async function login(page, email, password) {
 
   await acceptCookiesIfVisible(page);
 
-  // Wir erlauben bis zu 8 Iterationen (E-Mail → Passwort → ggf. zusätzliche Bestätigungen)
+  let passwordAttempted = false;
+
+  // Wir erlauben bis zu 8 Iterationen
   for (let step = 1; step <= 8; step++) {
     const currentUrl = page.url();
     console.log(`Login-Loop Step ${step}, aktuelle URL: ${currentUrl}`);
@@ -112,7 +116,15 @@ async function login(page, email, password) {
         console.log('Login abgeschlossen, finale URL:', currentUrl);
         return;
       }
-    } catch {
+
+      // Spezieller Fall: Two-Factor-URL
+      if (u.pathname.startsWith('/signin/two-factor')) {
+        throw new Error(
+          'Doctolib verlangt einen Zwei-Faktor-Code (two-factor). ' +
+          'Der Login kann nicht vollautomatisch durchgeführt werden.'
+        );
+      }
+    } catch (e) {
       // falls URL-Parsing schiefgeht, einfach weitermachen
     }
 
@@ -124,7 +136,6 @@ async function login(page, email, password) {
     try {
       emailVisible = await emailLocator.isVisible({ timeout: 2000 });
       if (emailVisible) {
-        // isDisabled() kann werfen, daher separat in try
         try {
           emailDisabled = await emailLocator.isDisabled();
         } catch {
@@ -147,18 +158,17 @@ async function login(page, email, password) {
         page.waitForLoadState('networkidle'),
       ]);
 
-      continue; // zurück zum Schleifenanfang
+      continue;
     }
 
     if (emailVisible && emailDisabled) {
       console.log(
         'E-Mail-Feld ist sichtbar, aber deaktiviert (vorbefüllt) → überspringe E-Mail-Logik und prüfe Passwort-Maske.'
       );
-      // Kein "Weiter"-Klick mehr hier – wir gehen direkt zur Passwort-Variante unten
+      // Kein weiterer Klick hier – weiter unten kommt die Passwort-Maske
     }
 
     // 2) Passwort-Maske?
-    // gezielt das Passwort-Input, NICHT den "Passwort anzeigen"-Button
     const passwordInput = page.locator(
       'input[type="password"][autocomplete="current-password"]'
     );
@@ -170,17 +180,40 @@ async function login(page, email, password) {
     }
 
     if (passwordVisible) {
-      console.log('Passwort-Maske sichtbar → fülle Passwort & klicke "Einloggen".');
+      if (passwordAttempted) {
+        // Wir waren bereits hier, haben Passwort gesendet und sind immer noch auf /signin
+        throw new Error(
+          'Nach einem Login-Versuch ist weiterhin die Passwort-Maske sichtbar. ' +
+          'Entweder ist das Passwort falsch oder Doctolib verlangt eine zusätzliche manuelle Sicherheitsbestätigung. ' +
+          'Bitte einmal manuell im Browser prüfen (passender Hinweis sollte angezeigt werden).'
+        );
+      }
+
+      console.log('Passwort-Maske sichtbar → fülle Passwort & prüfe Login-Button.');
 
       await passwordInput.fill(password);
 
       const loginButton = page.getByRole('button', { name: 'Einloggen' });
+
+      // Kurze Pause, damit etwaige Client-Validation den Button aktiviert
+      await page.waitForTimeout(300);
+
+      const enabled = await loginButton.isEnabled().catch(() => false);
+      if (!enabled) {
+        throw new Error(
+          'Der "Einloggen"-Button bleibt deaktiviert, obwohl ein Passwort gesetzt ist. ' +
+          'Vermutlich zusätzliche Sicherheitsmaßnahmen oder ein Client-Fehler. ' +
+          'Automation bricht an dieser Stelle ab.'
+        );
+      }
+
       await Promise.all([
         loginButton.click(),
         page.waitForLoadState('networkidle'),
       ]);
 
-      continue; // ggf. noch ein weiterer /signin-Schritt (z. B. two-factor)
+      passwordAttempted = true;
+      continue;
     }
 
     // 3) Weder E-Mail noch Passwort-Feld explizit gefunden → kurz warten
@@ -204,7 +237,6 @@ async function exportStatistics(page, orgId, fromDate, toDate) {
   console.log('Öffne Statistik-Seite –', statsUrl);
   await page.goto(statsUrl, { waitUntil: 'domcontentloaded' });
 
-  // Wenn Doctolib uns hier wieder auf /signin wirft, ist etwas mit Login/Sicherheit nicht ok
   if (page.url().includes('/signin')) {
     throw new Error(
       `Beim Öffnen der Statistikseite wieder auf /signin gelandet (mögliche Sicherheitsabfrage / 2FA). URL: ${page.url()}`
@@ -213,33 +245,24 @@ async function exportStatistics(page, orgId, fromDate, toDate) {
 
   console.log('Setze Zeitraum:', fromDate, '–', toDate);
 
-  // Statistik zu: Termine
   await page.locator('select[name="table"]').selectOption('appointment');
-
-  // Statistik der wahrgenommenen Termine
   await page.locator('select[name="date_filtering"]').selectOption('start_date');
 
-  // Zeitraum
   const fromInput = page.locator('input[name="from"]');
   const toInput = page.locator('input[name="to"]');
   await fromInput.fill(fromDate);
   await toInput.fill(toDate);
 
-  // Nach: Tag des Termins
   await page
     .locator('select[name="appointment_group"]')
     .selectOption('start_date_day');
-  // dann nach: Keine
   await page
     .locator('select[name="appointment_second_group"]')
     .selectOption('');
-
-  // Auswählen: Anzahl an Terminen
   await page
     .locator('select[name="appointment_select"]')
     .selectOption('appointment_count');
 
-  // Optional: „Gelöscht“ ausschließen, falls angehakt
   const deletedCheckbox = page.locator(
     'input[name="status_filters[]"][value="deleted"]'
   );
@@ -248,7 +271,7 @@ async function exportStatistics(page, orgId, fromDate, toDate) {
       await deletedCheckbox.uncheck();
     }
   } catch {
-    // falls Checkbox nicht existiert, ignorieren
+    // ignorieren, wenn nicht vorhanden
   }
 
   const exportsDir = await ensureExportsDir();
