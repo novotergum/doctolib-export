@@ -53,15 +53,15 @@ async function handleCookieBanner(page) {
       await page.waitForTimeout(500);
     }
   } catch {
-    // Banner einfach ignorieren, wenn nichts gefunden wird
+    // Banner ignorieren, wenn nichts gefunden wird
   }
 }
 
 /**
  * Login-Flow:
- * 1. /signin → E-Mail + „Weiter“
- * 2. Passwort-Maske (kann /signin/password ODER /signin/two-factor sein) → Passwort + „Einloggen“
- * 3. Warten bis wir IRGENDEINE URL haben, die NICHT mehr /signin… ist
+ * 1. /signin → Feld "E-Mail-Adresse" + Button "Weiter"
+ * 2. Passwort-Maske (Route kann /signin/password ODER /signin/two-factor sein) → Feld "Passwort" + Button "Einloggen"
+ * 3. Warten, bis wir eine URL haben, die NICHT mehr /signin… ist
  */
 async function login(page, email, password) {
   console.log('Gehe zur Login-Seite – https://pro.doctolib.de/signin');
@@ -73,9 +73,7 @@ async function login(page, email, password) {
   await handleCookieBanner(page);
 
   // --- Step 1: E-Mail-Adresse ------------------------------
-  const emailInput = page.locator(
-    'input[autocomplete="username"][type="email"], input#input_:r0:'
-  );
+  const emailInput = page.getByLabel('E-Mail-Adresse');
   await emailInput.waitFor({ timeout: 30000 });
   console.log('E-Mail-Maske sichtbar → fülle E-Mail.');
   await emailInput.fill(email);
@@ -86,9 +84,7 @@ async function login(page, email, password) {
   console.log('Login-Step 1 URL:', page.url());
 
   // --- Step 2: Passwort-Maske (Route kann /signin/two-factor heißen) ---
-  const passwordInput = page.locator(
-    'input[autocomplete="current-password"][type="password"], input#input_:r1:'
-  );
+  const passwordInput = page.getByLabel('Passwort');
   await passwordInput.waitFor({ timeout: 30000 });
   console.log('Passwort-Maske sichtbar → fülle Passwort.');
   await passwordInput.fill(password);
@@ -106,7 +102,6 @@ async function login(page, email, password) {
     await page.waitForLoadState('networkidle');
     console.log('Login abgeschlossen, aktuelle URL:', page.url());
   } catch (err) {
-    // Wenn wir nach 60s immer noch auf /signin… hängen, explizite Fehlermeldung
     throw new Error(
       `Login konnte nicht abgeschlossen werden; aktuelle URL: ${page.url()}`
     );
@@ -126,7 +121,7 @@ async function exportStatistics(page, orgId, fromDate, toDate) {
   // Statistik zu: Termine
   await page.locator('select[name="table"]').selectOption('appointment');
 
-  // Statistik der wahrgenommenen Termine
+  // Statistik der wahrgenommenen Termine (oder start_date je nach UI)
   await page.locator('select[name="date_filtering"]').selectOption('start_date');
 
   // Zeitraum
