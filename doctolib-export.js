@@ -83,11 +83,15 @@ async function login(page, email, password) {
   await page.waitForLoadState('networkidle');
   console.log('Login-Step 1 URL:', page.url());
 
-  // --- Step 2: Passwort-Maske (Route kann /signin/two-factor heißen) ---
-  const passwordInput = page.getByLabel('Passwort');
+      // --- Step 2: Passwort-Maske (Route kann /signin/password o.ä. heißen) ---
+  // gezielt das eigentliche Passwort-Input wählen, NICHT den "Passwort anzeigen"-Button
+  const passwordInput = page.locator('input[type="password"][autocomplete="current-password"]');
+  
   await passwordInput.waitFor({ timeout: 30000 });
   console.log('Passwort-Maske sichtbar → fülle Passwort.');
   await passwordInput.fill(password);
+
+
 
   const loginButton = page.getByRole('button', { name: 'Einloggen' });
   await loginButton.click();
