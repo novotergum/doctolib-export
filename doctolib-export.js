@@ -86,7 +86,7 @@ async function acceptCookiesIfVisible(page) {
 /**
  * Login-Schleife:
  * - Solange wir auf /signin… sind:
- *   - wenn E-Mail-Feld sichtbar → (sofern nicht disabled) E-Mail + "Weiter"
+ *   - wenn E-Mail-Feld sichtbar UND nicht disabled → E-Mail + "Weiter"
  *   - sonst, wenn Passwort-Feld sichtbar → Passwort + "Einloggen"
  *   - sonst kurz warten
  * - Sobald URL nicht mehr /signin… enthält → Login fertig
@@ -100,8 +100,8 @@ async function login(page, email, password) {
 
   await acceptCookiesIfVisible(page);
 
-  // Wir erlauben bis zu 6 Iterationen (z.B. E-Mail → Passwort → zweites Passwort etc.)
-  for (let step = 1; step <= 6; step++) {
+  // Wir erlauben bis zu 8 Iterationen (E-Mail → Passwort → ggf. zusätzliche Bestätigungen)
+  for (let step = 1; step <= 8; step++) {
     const currentUrl = page.url();
     console.log(`Login-Loop Step ${step}, aktuelle URL: ${currentUrl}`);
 
@@ -116,32 +116,30 @@ async function login(page, email, password) {
       // falls URL-Parsing schiefgeht, einfach weitermachen
     }
 
-    // 1) E-Mail-Maske?
+    // 1) E-Mail-Maske (nur wenn Feld NICHT disabled)
     const emailLocator = page.getByLabel('E-Mail-Adresse');
     let emailVisible = false;
+    let emailDisabled = false;
+
     try {
       emailVisible = await emailLocator.isVisible({ timeout: 2000 });
+      if (emailVisible) {
+        // isDisabled() kann werfen, daher separat in try
+        try {
+          emailDisabled = await emailLocator.isDisabled();
+        } catch {
+          emailDisabled = false;
+        }
+      }
     } catch {
       emailVisible = false;
+      emailDisabled = false;
     }
 
-    if (emailVisible) {
-      // prüfen, ob das Feld bereits disabled (vorbefüllt & gesperrt) ist
-      let isDisabled = false;
-      try {
-        isDisabled = await emailLocator.isDisabled();
-      } catch {
-        isDisabled = false;
-      }
+    if (emailVisible && !emailDisabled) {
+      console.log('E-Mail-Maske sichtbar (aktiv) → fülle E-Mail & klicke "Weiter".');
 
-      if (isDisabled) {
-        console.log(
-          'E-Mail-Feld ist deaktiviert und bereits gesetzt → fülle NICHT erneut, klicke nur "Weiter".'
-        );
-      } else {
-        console.log('E-Mail-Maske sichtbar → fülle E-Mail & klicke "Weiter".');
-        await emailLocator.fill(email);
-      }
+      await emailLocator.fill(email);
 
       const weiterButton = page.getByRole('button', { name: 'Weiter' });
       await Promise.all([
@@ -150,6 +148,13 @@ async function login(page, email, password) {
       ]);
 
       continue; // zurück zum Schleifenanfang
+    }
+
+    if (emailVisible && emailDisabled) {
+      console.log(
+        'E-Mail-Feld ist sichtbar, aber deaktiviert (vorbefüllt) → überspringe E-Mail-Logik und prüfe Passwort-Maske.'
+      );
+      // Kein "Weiter"-Klick mehr hier – wir gehen direkt zur Passwort-Variante unten
     }
 
     // 2) Passwort-Maske?
@@ -175,12 +180,12 @@ async function login(page, email, password) {
         page.waitForLoadState('networkidle'),
       ]);
 
-      continue; // ggf. noch ein weiterer /signin-Schritt
+      continue; // ggf. noch ein weiterer /signin-Schritt (z. B. two-factor)
     }
 
     // 3) Weder E-Mail noch Passwort-Feld explizit gefunden → kurz warten
     console.log(
-      'Weder E-Mail- noch Passwort-Feld eindeutig gefunden – warte kurz und prüfe erneut …'
+      'Weder aktive E-Mail- noch Passwort-Maske eindeutig gefunden – warte kurz und prüfe erneut …'
     );
     await page.waitForTimeout(2000);
   }
