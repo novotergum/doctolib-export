@@ -1,11 +1,9 @@
 {
-  "name": "doctolib-export",
+  "name": "doctolib-insights-export",
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "export": "node doctolib-export.js"
+    "export": "node export.js"
   },
-  "dependencies": {
-    "playwright": "^1.49.0"
-  }
+  "dependencies": {}
 }
