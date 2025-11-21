@@ -98,4 +98,125 @@ async function login(page) {
   console.log('Login abgeschlossen, aktuelle URL:', page.url());
 }
 
-// Statistik-Seite öffnen und
+// Statistik-Seite öffnen und Zeitraum setzen
+async function openStats(page, start, end) {
+  const url = `https://pro.doctolib.de/configuration/statistics/queries?organization_id=${DOCTOLIB_ORG_ID}`;
+  console.log('Öffne Statistik-Seite:', url);
+  await page.goto(url, { waitUntil: 'networkidle' });
+
+  console.log(`Setze Zeitraum: ${start} bis ${end}`);
+  await page.fill('#from', start);
+  await page.fill('#to', end);
+
+  await page.waitForTimeout(1500);
+}
+
+// Statistik-Parameter (Termine, Gruppierung, Status-Filter) setzen
+async function configureStats(page) {
+  console.log('Konfiguriere Statistik …');
+
+  // Statistik zu: Termine
+  await page.selectOption('#table', 'appointment');
+
+  // „Statistik der“: wahrgenommen / gebucht
+  await page.selectOption('#date_filtering', DATE_FILTERING);
+
+  // Gruppierung
+  await page.selectOption('#appointment_group', PRIMARY_GROUP);
+  await page.selectOption('#appointment_second_group', SECONDARY_GROUP || '');
+
+  // Kennzahl: Anzahl an Terminen
+  await page.selectOption('#appointment_select', 'appointment_count');
+
+  // Status-Filter „Auszuschließende Termine“
+  const allStatusValues = [
+    'done',
+    'no_show',
+    'no_show_but_ok',
+    'waiting',
+    'confirmed',
+    'deleted',
+    'in_progress',
+    'rescheduled',
+    'suspended',
+  ];
+  const excludeSet = new Set(EXCLUDE_STATUSES);
+  console.log(
+    'Auszuschließende Status:',
+    Array.from(excludeSet).join(', ') || '(keine)'
+  );
+
+  for (const value of allStatusValues) {
+    const selector = `input[name="status_filters[]"][value="${value}"]`;
+    const el = await page.$(selector);
+    if (!el) continue;
+
+    const shouldExclude = excludeSet.has(value);
+    const checked = await el.isChecked();
+
+    if (shouldExclude && !checked) {
+      await el.check();
+    } else if (!shouldExclude && checked) {
+      await el.uncheck();
+    }
+  }
+
+  await page.waitForTimeout(1000);
+}
+
+// Export auslösen und Datei speichern
+async function exportStats(page, start, end) {
+  if (!fs.existsSync(EXPORT_DIR)) {
+    fs.mkdirSync(EXPORT_DIR, { recursive: true });
+  }
+
+  console.log('Starte Export …');
+
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.click('input[name="csv"]'), // Button „Exportieren“
+  ]);
+
+  const suggested = await download.suggestedFilename();
+  const fileName = `doctolib_${start}_${end}_${suggested}`;
+  const filePath = path.join(EXPORT_DIR, fileName);
+
+  await download.saveAs(filePath);
+  console.log('Export gespeichert:', filePath);
+}
+
+// Main-Flow
+(async () => {
+  const { start, end } = lastMonthRange();
+  console.log(`Zeitraum (letzter Monat): ${start} – ${end}`);
+
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  page.setDefaultTimeout(60000);
+
+  try {
+    await login(page);
+    await openStats(page, start, end);
+    await configureStats(page);
+    await exportStats(page, start, end);
+    console.log('Fertig.');
+  } catch (e) {
+    console.error('Fehler im Doctolib-Export:', e);
+
+    // Debug-Screenshot bei Fehler
+    try {
+      if (!fs.existsSync(EXPORT_DIR)) {
+        fs.mkdirSync(EXPORT_DIR, { recursive: true });
+      }
+      const screenshotPath = path.join(EXPORT_DIR, 'error-login.png');
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      console.log('Fehler-Screenshot gespeichert unter:', screenshotPath);
+    } catch (screenshotErr) {
+      console.error('Konnte Screenshot nicht speichern:', screenshotErr);
+    }
+
+    process.exitCode = 1;
+  } finally {
+    await browser.close();
+  }
+})();
