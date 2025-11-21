@@ -78,19 +78,16 @@ async function loginWithOptionalTwoFactor(page) {
 
   await acceptCookiesIfPresent(page);
 
-  // maximal 4 Iterationen: E-Mail → Passwort → evtl. zweites Passwort → fertig
-  for (let step = 0; step < 4; step++) {
+  // maximal 5 Iterationen: E-Mail → Passwort → ggf. zweites Passwort → fertig
+  for (let step = 0; step < 5; step++) {
     const url = page.url();
     console.log('Login-Step', step, 'URL:', url);
 
-    // 1) E-Mail-Maske
-    const emailInput = page
-      .locator('input[autocomplete="username"], input[type="email"]')
-      .first();
-
-    if (await emailInput.isVisible().catch(() => false)) {
+    // ---------- 1) E-Mail-Maske ("Loggen Sie sich ein" + Feld "E-Mail-Adresse") ----------
+    const emailField = page.getByLabel('E-Mail-Adresse').first();
+    if (await emailField.isVisible().catch(() => false)) {
       console.log('E-Mail-Maske sichtbar → fülle E-Mail.');
-      await emailInput.fill(EMAIL);
+      await emailField.fill(EMAIL);
 
       const weiterButton = page.locator('button', { hasText: 'Weiter' }).first();
 
@@ -101,45 +98,48 @@ async function loginWithOptionalTwoFactor(page) {
           .catch(() => page.waitForLoadState('networkidle').catch(() => {})),
       ]);
 
-      continue; // Nächster Schritt (Passwort-Maske)
+      // danach kommt entweder direkt die Passwort-Maske oder dein Konto-Choice-Screen
+      continue;
     }
 
-    // 2) Passwort-Maske (normal oder /signin/two-factor)
-    const passwordInput = page
-      .locator(
-        'input[name="password"], ' +
-          'input[autocomplete="current-password"], ' +
-          'input#password'
-      )
-      .first();
+    // ---------- 2) Passwort-Maske (auch /signin/two-factor) ----------
+    // Markup:
+    // <label ...>Passwort</label>
+    // <input ... autocomplete="current-password" id="input_:r1:" type="password">
+    const passwordField = page.getByLabel('Passwort').first();
 
-    if (await passwordInput.isVisible().catch(() => false)) {
+    if (await passwordField.isVisible().catch(() => false)) {
       console.log('Passwort-Maske sichtbar → fülle Passwort.');
-      await passwordInput.fill(PASSWORD);
+      await passwordField.fill(PASSWORD);
 
-      const loginButton = page
+      const einloggenButton = page
         .locator('button', { hasText: 'Einloggen' })
         .first();
 
       await Promise.all([
-        loginButton.click(),
+        einloggenButton.click(),
         page
           .waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 })
           .catch(() => page.waitForLoadState('networkidle').catch(() => {})),
       ]);
 
-      // wenn nach dem ersten Passwort-Schritt /signin/two-factor kommt,
-      // wird im nächsten Loop-Durchlauf wieder passwordInput erkannt
+      // Falls Doctolib danach noch einmal auf /signin/two-factor o.Ä. geht,
+      // greifen wir im nächsten Loop-Durchlauf wieder auf das Passwort-Feld.
+      if (!page.url().includes('/signin')) {
+        console.log('Login abgeschlossen, aktuelle URL:', page.url());
+        return;
+      }
+
       continue;
     }
 
-    // 3) Wenn wir nicht mehr auf /signin sind → Login gilt als abgeschlossen
+    // ---------- 3) Wenn wir nicht mehr auf /signin sind, sind wir drin ----------
     if (!page.url().includes('/signin')) {
       console.log('Login abgeschlossen, aktuelle URL:', page.url());
       return;
     }
 
-    // 4) Kleine Pause und weiter probieren
+    // ---------- 4) kleinen Moment warten und noch einmal prüfen ----------
     await page.waitForTimeout(1000);
   }
 
