@@ -1,7 +1,6 @@
 name: Doctolib Termin-Export
 
 on:
-  # Manuell starten über "Run workflow" in GitHub
   workflow_dispatch:
     inputs:
       from:
@@ -13,24 +12,14 @@ on:
         required: true
         default: '2025-10-31'
 
-  # Optional: wenn du einen festen Rhythmus willst, auskommentieren und anpassen
-  # schedule:
-  #   - cron: '15 23 * * *'  # täglich 00:15 Uhr (Europe/Berlin) ≈ 23:15 UTC
-
 jobs:
   export:
     runs-on: ubuntu-latest
 
     env:
-      # Zugangsdaten aus Repository-Secrets
       DOCTOLIB_EMAIL: ${{ secrets.DOCTOLIB_EMAIL }}
       DOCTOLIB_PASSWORD: ${{ secrets.DOCTOLIB_PASSWORD }}
-
-      # Organisation-ID aus der Statistik-URL
-      # https://pro.doctolib.de/configuration/statistics/queries?organization_id=263702
       DOCTOLIB_ORG_ID: "263702"
-
-      # Zeitraum aus den Inputs des Workflows
       DOCTOLIB_FROM: ${{ github.event.inputs.from }}
       DOCTOLIB_TO: ${{ github.event.inputs.to }}
 
@@ -41,11 +30,10 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
+          node-version: 20          # <– cache raus
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci || npm install   # falls noch kein package-lock da ist
 
       - name: Install Playwright browsers
         run: npx playwright install chromium
