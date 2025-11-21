@@ -1,7 +1,8 @@
+// package.json
 {
   "name": "doctolib-export",
   "version": "1.0.0",
-  "private": true,
+  "type": "module",        // <--- DAS ergänzen
   "scripts": {
     "export": "node doctolib-export.js"
   },
