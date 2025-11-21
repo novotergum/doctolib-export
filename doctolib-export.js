@@ -10,15 +10,20 @@ const DOCTOLIB_USER = process.env.DOCTOLIB_USER;
 const DOCTOLIB_PASS = process.env.DOCTOLIB_PASS;
 const DOCTOLIB_ORG_ID = process.env.DOCTOLIB_ORG_ID; // z.B. 263702
 
-// Login-URL (bei dir ist das Frontend /signin)
+// Login-URL (bei dir meistens /signin; per ENV überschreibbar)
 const DOCTOLIB_LOGIN_URL =
   process.env.DOCTOLIB_LOGIN_URL || 'https://pro.doctolib.de/signin';
+
+// User-Agent, damit der Runner möglichst wie dein Browser aussieht
+const DOCTOLIB_UA =
+  process.env.DOCTOLIB_UA ||
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 
 // Export-Verzeichnis
 const EXPORT_DIR = process.env.EXPORT_DIR || path.join(__dirname, 'exports');
 
 // Statistik-Konfiguration
-const DATE_FILTERING = process.env.DATE_FILTERING || 'start_date'; // 'start_date' = wahrgenommen
+const DATE_FILTERING = process.env.DATE_FILTERING || 'start_date'; // 'start_date' = wahrgenommen, 'created_at' = gebucht
 const PRIMARY_GROUP = process.env.PRIMARY_GROUP || 'agenda';       // 'agenda' = Terminkalender
 const SECONDARY_GROUP = process.env.SECONDARY_GROUP || '';         // '' = keine zweite Gruppierung
 const EXCLUDE_STATUSES = (process.env.EXCLUDE_STATUSES || 'deleted')
@@ -41,6 +46,44 @@ function lastMonthRange() {
   return { start: fmt(firstLastMonth), end: fmt(lastLastMonth) };
 }
 
+// sicherstellen, dass wir wirklich auf der Login-Maske sind
+async function ensureLoginForm(page) {
+  const emailSelector = 'input[autocomplete="username"], input[type="email"]';
+  const emailLocator = page.locator(emailSelector).first();
+
+  try {
+    await emailLocator.waitFor({ timeout: 10000 });
+    return; // Formular ist schon da
+  } catch (_) {
+    console.log('Kein Login-Input sichtbar – versuche, Login-Link zu klicken …');
+  }
+
+  const loginLink = page
+    .locator(
+      [
+        'a[href*="signin"]',
+        'a[href*="login"]',
+        'a:has-text("Einloggen")',
+        'a:has-text("Login")',
+        'button:has-text("Einloggen")',
+        'button:has-text("Login")'
+      ].join(', ')
+    )
+    .first();
+
+  if (await loginLink.isVisible().catch(() => false)) {
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle' }),
+      loginLink.click(),
+    ]);
+  } else {
+    console.log('Kein Login-Link gefunden; bleibe auf aktueller Seite.');
+  }
+
+  // nach Klick noch einmal auf das Formular warten
+  await page.locator(emailSelector).first().waitFor({ timeout: 20000 });
+}
+
 // Login auf Doctolib
 async function login(page) {
   console.log('Gehe zur Login-Seite …', DOCTOLIB_LOGIN_URL);
@@ -61,13 +104,15 @@ async function login(page) {
     // kein Banner: ok
   }
 
+  // sicherstellen, dass das Login-Formular wirklich da ist
+  await ensureLoginForm(page);
+
   // E-Mail / Username
   const emailLocator = page
     .locator('input[autocomplete="username"], input[type="email"]')
     .first();
 
-  console.log('Warte auf E-Mail-Feld …');
-  await emailLocator.waitFor();
+  console.log('Fülle E-Mail …');
   await emailLocator.fill(DOCTOLIB_USER);
 
   // Passwort
@@ -75,8 +120,7 @@ async function login(page) {
     .locator('input[autocomplete="current-password"], input[type="password"]')
     .first();
 
-  console.log('Warte auf Passwort-Feld …');
-  await passwordLocator.waitFor();
+  console.log('Fülle Passwort …');
   await passwordLocator.fill(DOCTOLIB_PASS);
 
   // Submit
@@ -167,7 +211,7 @@ async function exportStats(page, start, end) {
 
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.click('input[name="csv"]'),
+    page.click('input[name="csv"]'), // Button „Exportieren“
   ]);
 
   const suggested = await download.suggestedFilename();
@@ -184,7 +228,11 @@ async function exportStats(page, start, end) {
   console.log(`Zeitraum (letzter Monat): ${start} – ${end}`);
 
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const context = await browser.newContext({
+    userAgent: DOCTOLIB_UA,
+    viewport: { width: 1280, height: 720 },
+  });
+  const page = await context.newPage();
   page.setDefaultTimeout(60000);
 
   try {
@@ -203,6 +251,7 @@ async function exportStats(page, start, end) {
       const screenshotPath = path.join(EXPORT_DIR, 'error-login.png');
       await page.screenshot({ path: screenshotPath, fullPage: true });
       console.log('Fehler-Screenshot gespeichert unter:', screenshotPath);
+
       const htmlSnippet = (await page.content()).slice(0, 2000);
       console.log('Aktuelle URL:', page.url());
       console.log('HTML-Ausschnitt:\n', htmlSnippet);
