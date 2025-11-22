@@ -47,9 +47,12 @@ function loadConfigFromEnv() {
   const email = process.env.DOCTOLIB_EMAIL;
   const password = process.env.DOCTOLIB_PASSWORD;
   const orgId = process.env.DOCTOLIB_ORG_ID; // aktuell noch ungenutzt, aber vorgesehen
+  const storageStatePath = process.env.DOCTOLIB_STORAGE_STATE || null;
 
-  if (!email || !password || !orgId) {
-    console.error('Bitte DOCTOLIB_EMAIL, DOCTOLIB_PASSWORD und DOCTOLIB_ORG_ID als Umgebungsvariablen setzen.');
+  if (!storageStatePath && (!email || !password || !orgId)) {
+    console.error(
+      'Bitte mindestens DOCTOLIB_STORAGE_STATE ODER (DOCTOLIB_EMAIL, DOCTOLIB_PASSWORD, DOCTOLIB_ORG_ID) setzen.'
+    );
     process.exit(1);
   }
 
@@ -63,7 +66,7 @@ function loadConfigFromEnv() {
     console.log(`DOCTOLIB_FROM/TO nicht gesetzt – nutze letzten vollen Monat: ${from} – ${to}`);
   }
 
-  return { email, password, orgId, from, to };
+  return { email, password, orgId, from, to, storageStatePath };
 }
 
 async function ensureExportDir() {
@@ -74,15 +77,8 @@ async function ensureExportDir() {
 // Cookie-/Consent-Banner Handling (Didomi & Co.)
 // ----------------------------------------------------
 
-/**
- * Versucht, das Didomi-/Cookie-Overlay wirklich wegzubekommen.
- * Priorität:
- *   1. #didomi-host (das Overlay, das deine Klicks blockiert)
- *   2. Evtl. iframe-Varianten
- *   3. Sehr enger Fallback auf der Hauptseite
- */
 async function maybeHandleCookieBanner(page) {
-  // 1) Didomi-Overlay direkt auf der Seite (#didomi-host)
+  // 1) Didomi-Overlay (#didomi-host)
   try {
     const didomiHost = page.locator('#didomi-host');
     if (await didomiHost.isVisible().catch(() => false)) {
@@ -104,17 +100,16 @@ async function maybeHandleCookieBanner(page) {
         await acceptButton.click({ trial: false });
         await page.waitForTimeout(1000);
 
-        // Prüfen, ob das Overlay wirklich weg ist
         if (!(await didomiHost.isVisible().catch(() => false))) {
           return;
         }
       }
     }
   } catch (e) {
-    // stillschweigend ignorieren, wenn die Struktur abweicht
+    // ignorieren
   }
 
-  // 2) Mögliche iframe-Variante (falls Didomi im iframe läuft)
+  // 2) iframe-Variante
   try {
     const frameLocator = page.frameLocator(
       'iframe[id^="didomi-host"], iframe[src*="didomi"], iframe[title*="consent"], iframe[title*="Cookie"]'
@@ -142,7 +137,7 @@ async function maybeHandleCookieBanner(page) {
     // ignorieren
   }
 
-  // 3) Sehr restriktiver Fallback auf Hauptseite (nur wenn #didomi-host NICHT sichtbar ist)
+  // 3) restriktiver Fallback
   try {
     const didomiHost = page.locator('#didomi-host');
     const didomiVisible = await didomiHost.isVisible().catch(() => false);
@@ -167,12 +162,12 @@ async function maybeHandleCookieBanner(page) {
       }
     }
   } catch (e) {
-    // egal, weiter
+    // ignorieren
   }
 }
 
 // ----------------------------------------------------
-// Login-Logik
+// Login-Logik (nur als Fallback – bei dir triggert 2FA → bricht sauber ab)
 // ----------------------------------------------------
 
 async function login(page, email, password) {
@@ -180,7 +175,6 @@ async function login(page, email, password) {
   console.log(`Gehe zur Login-Seite – ${loginUrl}`);
   await page.goto(loginUrl, { waitUntil: 'networkidle' });
 
-  // Direkt nach dem ersten Laden das Cookie-Overlay wegdrücken
   await maybeHandleCookieBanner(page);
 
   const maxSteps = 10;
@@ -189,20 +183,17 @@ async function login(page, email, password) {
     const currentUrl = page.url();
     console.log(`Login-Loop Step ${step}, aktuelle URL: ${currentUrl}`);
 
-    // Wenn wir nicht mehr auf /signin sind → Login erfolgreich
     if (!currentUrl.includes('/signin')) {
       console.log('Login scheint erfolgreich – nicht mehr auf /signin.');
       return;
     }
 
-    // Zwei-Faktor-Seite → wir brechen ab (kein automatisierbares OTP)
     if (currentUrl.includes('/signin/two-factor')) {
       throw new Error(
         'Doctolib verlangt Zwei-Faktor-Authentifizierung (/signin/two-factor). Automatischer Login wird abgebrochen.'
       );
     }
 
-    // Vor jeder Interaktion erneut versuchen, das Overlay zu schließen
     await maybeHandleCookieBanner(page);
 
     const emailInput = page.locator('input[autocomplete="username"][type="email"]');
@@ -211,7 +202,6 @@ async function login(page, email, password) {
     const emailVisible = await emailInput.isVisible().catch(() => false);
     const passwordVisible = await passwordInput.isVisible().catch(() => false);
 
-    // 1) E-Mail-Maske
     if (emailVisible && !passwordVisible) {
       const emailDisabled = !(await emailInput.isEnabled().catch(() => true));
 
@@ -224,7 +214,6 @@ async function login(page, email, password) {
         );
       }
 
-      // nochmal sicherstellen, dass kein Overlay blockiert
       await maybeHandleCookieBanner(page);
 
       const weiterButton = page.getByRole('button', { name: 'Weiter' }).first();
@@ -240,14 +229,11 @@ async function login(page, email, password) {
       continue;
     }
 
-    // 2) Passwort-Maske (Passwort eingeben)
     if (passwordVisible) {
       console.log('Passwort-Maske sichtbar → fülle Passwort & bestätige über Enter.');
 
       await passwordInput.fill(password);
       await page.waitForTimeout(200);
-
-      // vor Submit erneut Overlay killen
       await maybeHandleCookieBanner(page);
 
       await Promise.all([
@@ -286,7 +272,6 @@ async function login(page, email, password) {
       continue;
     }
 
-    // 3) Weder E-Mail noch Passwort klar sichtbar
     console.log(
       'Keine bekannte Login-Maske erkannt – versuche nochmals Cookie-/Consent-Overlay zu schließen & warte kurz …'
     );
@@ -308,19 +293,16 @@ async function exportAppointmentStatistics(page, { from, to }) {
   await page.goto(statsUrl, { waitUntil: 'networkidle' });
   await maybeHandleCookieBanner(page);
 
-  // Tabelle „Termine“
   const tableSelect = page.locator('#table');
   if (await tableSelect.isVisible().catch(() => false)) {
     await tableSelect.selectOption('appointment');
   }
 
-  // Datumsfilter: „wahrgenommene Termine“ → start_date
   const dateFilteringSelect = page.locator('#date_filtering');
   if (await dateFilteringSelect.isVisible().catch(() => false)) {
     await dateFilteringSelect.selectOption('start_date');
   }
 
-  // Datumsbereich setzen
   const fromInput = page.locator('#from');
   const toInput = page.locator('#to');
 
@@ -331,7 +313,6 @@ async function exportAppointmentStatistics(page, { from, to }) {
     await toInput.fill(to);
   }
 
-  // Gruppierung: Terminkalender (Agenda)
   const groupSelect = page.locator('#appointment_group');
   if (await groupSelect.isVisible().catch(() => false)) {
     await groupSelect.selectOption('agenda');
@@ -342,7 +323,6 @@ async function exportAppointmentStatistics(page, { from, to }) {
     await secondGroupSelect.selectOption('');
   }
 
-  // CSV-Export
   const exportButton = page.locator('input[type="submit"][name="csv"]');
 
   if (!(await exportButton.isVisible().catch(() => false))) {
@@ -373,19 +353,29 @@ async function exportAppointmentStatistics(page, { from, to }) {
 // ----------------------------------------------------
 
 (async () => {
-  const { email, password, orgId, from, to } = loadConfigFromEnv();
+  const { email, password, orgId, from, to, storageStatePath } = loadConfigFromEnv();
   void orgId; // derzeit ungenutzt
 
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+
+  let context;
+  let page;
 
   try {
     await ensureExportDir();
 
-    await login(page, email, password);
-    await exportAppointmentStatistics(page, { from, to });
+    if (storageStatePath && fs.existsSync(storageStatePath)) {
+      console.log(`Nutze vorhandenes storageState: ${storageStatePath} (kein Login via Passwort notwendig).`);
+      context = await browser.newContext({ storageState: storageStatePath });
+      page = await context.newPage();
+    } else {
+      console.log('Kein gültiges storageState gefunden – nutze Login via E-Mail/Passwort (falls kein 2FA).');
+      context = await browser.newContext();
+      page = await context.newPage();
+      await login(page, email, password);
+    }
 
+    await exportAppointmentStatistics(page, { from, to });
     console.log('Doctolib-Export erfolgreich abgeschlossen.');
   } catch (err) {
     console.error('Fehler im Doctolib-Export:', err && err.message ? err.message : err);
@@ -393,8 +383,11 @@ async function exportAppointmentStatistics(page, { from, to }) {
     try {
       await ensureExportDir();
       const screenshotPath = path.join(EXPORT_DIR, 'error-login.png');
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      console.error(`Fehler-Screenshot gespeichert unter: ${screenshotPath}`);
+      if (!page && context) page = await context.newPage();
+      if (page) {
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.error(`Fehler-Screenshot gespeichert unter: ${screenshotPath}`);
+      }
     } catch (screenshotErr) {
       console.error('Konnte Fehler-Screenshot nicht speichern:', screenshotErr && screenshotErr.message);
     }
