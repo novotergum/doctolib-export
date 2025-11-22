@@ -22,13 +22,17 @@ function formatDate(date) {
 }
 
 /**
- * Letzten vollen Monat berechnen (z. B. heute 2025-11-21 → 2025-10-01 bis 2025-10-31)
+ * Letzten vollen Monat berechnen
  */
 function computeLastFullMonthRange() {
   const now = new Date();
-  const firstOfCurrentMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const firstOfCurrentMonth = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+  );
   const lastDayPrevMonth = new Date(firstOfCurrentMonth.getTime() - 24 * 60 * 60 * 1000);
-  const firstDayPrevMonth = new Date(Date.UTC(lastDayPrevMonth.getUTCFullYear(), lastDayPrevMonth.getUTCMonth(), 1));
+  const firstDayPrevMonth = new Date(
+    Date.UTC(lastDayPrevMonth.getUTCFullYear(), lastDayPrevMonth.getUTCMonth(), 1)
+  );
 
   return {
     from: formatDate(firstDayPrevMonth),
@@ -42,7 +46,7 @@ function computeLastFullMonthRange() {
 function loadConfigFromEnv() {
   const email = process.env.DOCTOLIB_EMAIL;
   const password = process.env.DOCTOLIB_PASSWORD;
-  const orgId = process.env.DOCTOLIB_ORG_ID; // aktuell optional, für spätere DB-Insights-Nutzung
+  const orgId = process.env.DOCTOLIB_ORG_ID; // aktuell noch ungenutzt, aber vorgesehen
 
   if (!email || !password || !orgId) {
     console.error('Bitte DOCTOLIB_EMAIL, DOCTOLIB_PASSWORD und DOCTOLIB_ORG_ID als Umgebungsvariablen setzen.');
@@ -62,78 +66,121 @@ function loadConfigFromEnv() {
   return { email, password, orgId, from, to };
 }
 
-/**
- * Stellt sicher, dass der Export-Ordner existiert.
- */
 async function ensureExportDir() {
   await fs.promises.mkdir(EXPORT_DIR, { recursive: true });
 }
 
 // ----------------------------------------------------
-// Cookie-Banner / Consent
+// Cookie-/Consent-Banner Handling (Didomi & Co.)
 // ----------------------------------------------------
 
 /**
- * Versucht, Cookie-/Consent-Banner zu schließen (Hauptseite + iframe-Varianten).
- * Keine harte Abhängigkeit – wenn nichts gefunden wird, läuft es einfach weiter.
+ * Versucht, das Didomi-/Cookie-Overlay wirklich wegzubekommen.
+ * Priorität:
+ *   1. #didomi-host (das Overlay, das deine Klicks blockiert)
+ *   2. Evtl. iframe-Varianten
+ *   3. Sehr enger Fallback auf der Hauptseite
  */
 async function maybeHandleCookieBanner(page) {
-  // Variante: Banner direkt auf der Seite als Button
+  // 1) Didomi-Overlay direkt auf der Seite (#didomi-host)
   try {
-    const bannerButton = page
-      .getByRole('button', {
-        name: /Akzeptieren|Alle akzeptieren|Einverstanden|Zustimmen|OK|Okay|Alles erlauben|Ich stimme zu/i,
-      })
-      .first();
+    const didomiHost = page.locator('#didomi-host');
+    if (await didomiHost.isVisible().catch(() => false)) {
+      const acceptButton = didomiHost
+        .locator(
+          [
+            'button:has-text("Alle akzeptieren")',
+            'button:has-text("Akzeptieren")',
+            'button:has-text("Zustimmen")',
+            'button:has-text("Einverstanden")',
+            'button:has-text("Accept all")',
+            'button:has-text("Accept")',
+          ].join(', ')
+        )
+        .first();
 
-    if (await bannerButton.isVisible().catch(() => false)) {
-      console.log('Cookie-Banner auf Hauptseite gefunden → klicke „Akzeptieren“.');
-      await bannerButton.click();
-      await page.waitForTimeout(1000);
-      return;
+      if (await acceptButton.isVisible().catch(() => false)) {
+        console.log('Didomi-Cookie-Overlay (#didomi-host) gefunden → klicke „Akzeptieren/Alle akzeptieren“.');
+        await acceptButton.click({ trial: false });
+        await page.waitForTimeout(1000);
+
+        // Prüfen, ob das Overlay wirklich weg ist
+        if (!(await didomiHost.isVisible().catch(() => false))) {
+          return;
+        }
+      }
     }
-  } catch {
-    // Ignorieren, wenn nichts gefunden wird
+  } catch (e) {
+    // stillschweigend ignorieren, wenn die Struktur abweicht
   }
 
-  // Variante: Cookie-Banner in iframe (z. B. Didomi)
+  // 2) Mögliche iframe-Variante (falls Didomi im iframe läuft)
   try {
     const frameLocator = page.frameLocator(
       'iframe[id^="didomi-host"], iframe[src*="didomi"], iframe[title*="consent"], iframe[title*="Cookie"]'
     );
     const frameButton = frameLocator
-      .getByRole('button', {
-        name: /Akzeptieren|Alle akzeptieren|Einverstanden|Zustimmen|OK|Okay|Agree|Accept/i,
-      })
+      .locator(
+        [
+          'button:has-text("Alle akzeptieren")',
+          'button:has-text("Akzeptieren")',
+          'button:has-text("Zustimmen")',
+          'button:has-text("Einverstanden")',
+          'button:has-text("Accept all")',
+          'button:has-text("Accept")',
+        ].join(', ')
+      )
       .first();
 
     if (await frameButton.isVisible().catch(() => false)) {
-      console.log('Cookie-Banner im iframe gefunden → klicke „Akzeptieren“.');
+      console.log('Cookie-Banner im iframe gefunden → klicke „Akzeptieren/Alle akzeptieren“.');
       await frameButton.click();
       await page.waitForTimeout(1000);
+      return;
     }
-  } catch {
-    // Ebenfalls ignorieren
+  } catch (e) {
+    // ignorieren
+  }
+
+  // 3) Sehr restriktiver Fallback auf Hauptseite (nur wenn #didomi-host NICHT sichtbar ist)
+  try {
+    const didomiHost = page.locator('#didomi-host');
+    const didomiVisible = await didomiHost.isVisible().catch(() => false);
+
+    if (!didomiVisible) {
+      const bannerButton = page
+        .locator(
+          [
+            '#didomi-host button:has-text("Alle akzeptieren")',
+            '#didomi-host button:has-text("Akzeptieren")',
+            'button[data-testid*="accept"]:has-text("Akzeptieren")',
+            'button[data-testid*="accept"]:has-text("Alle akzeptieren")',
+          ].join(', ')
+        )
+        .first();
+
+      if (await bannerButton.isVisible().catch(() => false)) {
+        console.log('Cookie-Banner auf Hauptseite gefunden → klicke „Akzeptieren“.');
+        await bannerButton.click();
+        await page.waitForTimeout(1000);
+        return;
+      }
+    }
+  } catch (e) {
+    // egal, weiter
   }
 }
 
 // ----------------------------------------------------
-// Login-Logik (mehrstufig, robust gegen UI-Varianten)
+// Login-Logik
 // ----------------------------------------------------
 
-/**
- * Login bei Doctolib.
- * Unterstützt:
- *  - klassischen 2-Screen Login (E-Mail → Passwort)
- *  - re-auth Screen „Passwort eingeben“ (wenn man schon eingeloggt war)
- *
- * Bricht ab, wenn Doctolib eine echte Zwei-Faktor-Seite (/signin/two-factor) anzeigt.
- */
 async function login(page, email, password) {
   const loginUrl = 'https://pro.doctolib.de/signin';
   console.log(`Gehe zur Login-Seite – ${loginUrl}`);
   await page.goto(loginUrl, { waitUntil: 'networkidle' });
 
+  // Direkt nach dem ersten Laden das Cookie-Overlay wegdrücken
   await maybeHandleCookieBanner(page);
 
   const maxSteps = 10;
@@ -142,27 +189,29 @@ async function login(page, email, password) {
     const currentUrl = page.url();
     console.log(`Login-Loop Step ${step}, aktuelle URL: ${currentUrl}`);
 
-    // Wenn wir nicht mehr auf /signin sind → Login offenbar erfolgreich
+    // Wenn wir nicht mehr auf /signin sind → Login erfolgreich
     if (!currentUrl.includes('/signin')) {
       console.log('Login scheint erfolgreich – nicht mehr auf /signin.');
       return;
     }
 
-    // Falls Doctolib auf Zwei-Faktor-Seite geleitet hat → sauber abbrechen
+    // Zwei-Faktor-Seite → wir brechen ab (kein automatisierbares OTP)
     if (currentUrl.includes('/signin/two-factor')) {
       throw new Error(
         'Doctolib verlangt Zwei-Faktor-Authentifizierung (/signin/two-factor). Automatischer Login wird abgebrochen.'
       );
     }
 
-    // Selektoren passen exakt zu den von dir geposteten HTML-Snippets
+    // Vor jeder Interaktion erneut versuchen, das Overlay zu schließen
+    await maybeHandleCookieBanner(page);
+
     const emailInput = page.locator('input[autocomplete="username"][type="email"]');
     const passwordInput = page.locator('input[autocomplete="current-password"][type="password"]');
 
     const emailVisible = await emailInput.isVisible().catch(() => false);
     const passwordVisible = await passwordInput.isVisible().catch(() => false);
 
-    // 1) E-Mail-Maske (Screen „Loggen Sie sich ein“)
+    // 1) E-Mail-Maske
     if (emailVisible && !passwordVisible) {
       const emailDisabled = !(await emailInput.isEnabled().catch(() => true));
 
@@ -170,8 +219,13 @@ async function login(page, email, password) {
         console.log('E-Mail-Maske sichtbar (aktiv) → fülle E-Mail & klicke „Weiter“.');
         await emailInput.fill(email);
       } else {
-        console.log('E-Mail-Feld ist sichtbar, aber deaktiviert (vorbefüllt) → klicke nur „Weiter“.');
+        console.log(
+          'E-Mail-Feld ist sichtbar, aber deaktiviert (vorbefüllt) → überspringe Fill & klicke nur „Weiter“.'
+        );
       }
+
+      // nochmal sicherstellen, dass kein Overlay blockiert
+      await maybeHandleCookieBanner(page);
 
       const weiterButton = page.getByRole('button', { name: 'Weiter' }).first();
 
@@ -183,31 +237,30 @@ async function login(page, email, password) {
       ]);
 
       await page.waitForTimeout(1500);
-      await maybeHandleCookieBanner(page);
       continue;
     }
 
-    // 2) Passwort-Maske (Screen „Passwort eingeben“ oder Re-Auth)
+    // 2) Passwort-Maske (Passwort eingeben)
     if (passwordVisible) {
       console.log('Passwort-Maske sichtbar → fülle Passwort & bestätige über Enter.');
 
       await passwordInput.fill(password);
       await page.waitForTimeout(200);
 
-      // Enter auf dem Passwortfeld löst den Form-Submit aus
+      // vor Submit erneut Overlay killen
+      await maybeHandleCookieBanner(page);
+
       await Promise.all([
         page.waitForNavigation({ waitUntil: 'networkidle' }).catch(() => {}),
         passwordInput.press('Enter').catch(() => {}),
       ]);
       await page.waitForTimeout(2000);
 
-      // Prüfen, ob wir von /signin weg sind
       if (!page.url().includes('/signin')) {
         console.log('Login erfolgreich – nach Passwort-Eingabe weitergeleitet.');
         return;
       }
 
-      // Noch auf /signin → schauen, ob eine Fehlermeldung angezeigt wird
       const hasErrorText =
         (await page
           .getByText(/falsches Passwort|stimmen nicht überein|Ungültig|nicht korrekt/i)
@@ -227,16 +280,15 @@ async function login(page, email, password) {
       }
 
       console.log(
-        'Passwort-Maske weiterhin sichtbar ohne klare Fehlermeldung – Cookie-Banner prüfen & noch einen Versuch zulassen …'
+        'Passwort-Maske weiterhin sichtbar ohne klare Fehlermeldung – noch einen Versuch nach kurzem Warten …'
       );
-      await maybeHandleCookieBanner(page);
       await page.waitForTimeout(1500);
       continue;
     }
 
-    // 3) Weder E-Mail- noch Passwort-Feld erkennbar
+    // 3) Weder E-Mail noch Passwort klar sichtbar
     console.log(
-      'Keine bekannte Login-Maske erkannt – versuche ggf. Cookie-/Consent-Banner zu schließen & warte kurz, dann erneut prüfen …'
+      'Keine bekannte Login-Maske erkannt – versuche nochmals Cookie-/Consent-Overlay zu schließen & warte kurz …'
     );
     await maybeHandleCookieBanner(page);
     await page.waitForTimeout(1500);
@@ -249,12 +301,6 @@ async function login(page, email, password) {
 // Statistik-Export
 // ----------------------------------------------------
 
-/**
- * Navigiert auf die Statistik-Seite und exportiert Termine als CSV.
- * - Tabelle: Termine
- * - Datumsfilter: wahrgenommene Termine (start_date)
- * - Gruppierung: Terminkalender (agenda)
- */
 async function exportAppointmentStatistics(page, { from, to }) {
   const statsUrl = 'https://pro.doctolib.de/configuration/statistics';
   console.log(`Öffne Statistik-Seite – ${statsUrl}`);
@@ -268,10 +314,10 @@ async function exportAppointmentStatistics(page, { from, to }) {
     await tableSelect.selectOption('appointment');
   }
 
-  // Datumsfilter: „wahrgenommenen“ Termine → start_date
+  // Datumsfilter: „wahrgenommene Termine“ → start_date
   const dateFilteringSelect = page.locator('#date_filtering');
   if (await dateFilteringSelect.isVisible().catch(() => false)) {
-    await dateFilteringSelect.selectOption('start_date'); // "wahrgenommenen Termine"
+    await dateFilteringSelect.selectOption('start_date');
   }
 
   // Datumsbereich setzen
@@ -285,28 +331,18 @@ async function exportAppointmentStatistics(page, { from, to }) {
     await toInput.fill(to);
   }
 
-  // Gruppierung: nach Terminkalender, optional ohne zweite Gruppierung
+  // Gruppierung: Terminkalender (Agenda)
   const groupSelect = page.locator('#appointment_group');
   if (await groupSelect.isVisible().catch(() => false)) {
-    await groupSelect.selectOption('agenda'); // Terminkalender = pro Standort-Kalender
+    await groupSelect.selectOption('agenda');
   }
 
   const secondGroupSelect = page.locator('#appointment_second_group');
   if (await secondGroupSelect.isVisible().catch(() => false)) {
-    await secondGroupSelect.selectOption(''); // Keine zweite Gruppierung
+    await secondGroupSelect.selectOption('');
   }
 
-  // Optional: Status-Filter anpassen – Beispiel: gelöschte Termine ausschließen
-  // Hängt von deinem gewünschten Reporting ab; hier nur exemplarisch:
-  /*
-  const deletedCheckbox = page.locator('input[name="status_filters[]"][value="deleted"]');
-  if (await deletedCheckbox.isChecked().catch(() => false)) {
-    console.log('Schließe gelöschte Termine aus.');
-    await deletedCheckbox.uncheck();
-  }
-  */
-
-  // CSV-Export-Button klicken und Download abfangen
+  // CSV-Export
   const exportButton = page.locator('input[type="submit"][name="csv"]');
 
   if (!(await exportButton.isVisible().catch(() => false))) {
@@ -338,17 +374,10 @@ async function exportAppointmentStatistics(page, { from, to }) {
 
 (async () => {
   const { email, password, orgId, from, to } = loadConfigFromEnv();
-  // orgId aktuell nicht genutzt, aber für spätere DB-Insights-Exports bereits vorhanden
-  void orgId;
+  void orgId; // derzeit ungenutzt
 
-  const browser = await chromium.launch({
-    headless: true,
-  });
-
-  const context = await browser.newContext({
-    // Optional: realistischere Viewport/User-Agent-Konfiguration
-  });
-
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
   const page = await context.newPage();
 
   try {
